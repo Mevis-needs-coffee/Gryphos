@@ -15,11 +15,12 @@ of evidence.
 | `gryphos/llm.py` | OpenRouter client: model catalog + TTL cache, exact-ID selection, classified errors, decision extraction + bounded repair. |
 | `gryphos/models.py` | Pydantic decision schemas and the strict JSON parser. |
 | `gryphos/agent.py` | Bounded agent loop; orchestration of validation, approval, execution, recording. |
-| `gryphos/scope.py` | Scope parsing/enforcement and URL authorization (the security boundary). |
+| `gryphos/scope.py` | Scope parsing/enforcement, URL authorization, and reserved-address classification (the security boundary). |
 | `gryphos/approval.py` | Approval requests with SHA-256 action fingerprints; single-use, default-deny. |
-| `gryphos/tools.py` | Tool registry + the five registered tools; argument validation; fixed argv, no shell. |
+| `gryphos/tools/` | Modular tool package: `base.py` (interfaces + validation), `net.py` (bounded HTTP/TLS helpers), one module per tool, `registry.py` (`build_registry`). |
+| `gryphos/analysis.py` | Offline evidence analysis (Tool 10): normalization, cross-tool correlation, contradiction detection, session comparison, and the passive `summarize_evidence` tool. |
 | `gryphos/session.py` | Session records and atomic JSON persistence; legacy + corrupt-file tolerance. |
-| `gryphos/reporting.py` | Markdown report + JSON evidence generation. |
+| `gryphos/reporting.py` | Markdown report + JSON evidence generation (includes correlation and contradiction sections). |
 
 ## Trust boundaries
 
@@ -29,10 +30,10 @@ of evidence.
  │  LLM (OpenRouter)     │ ───────────────────▶│  Decision parser (models.py)          │
  │  target banners/      │                     │  Schema validation                    │
  │  scan output/headers  │◀─────────────────── │  Scope check (scope.py)               │
- └───────────────────────┘      evidence        │  Argument validation (tools.py)      │
-                                                │  Approval (approval.py, human)        │
-                                                │  Registered execution (tools.py)     │
-                                                └──────────────────────────────────────┘
+ └───────────────────────┘      evidence        │  Argument validation (tools/base.py) │
+                                                 │  Approval (approval.py, human)        │
+                                                 │  Registered execution (tools/*)      │
+                                                 └──────────────────────────────────────┘
 ```
 
 - The **LLM is untrusted**. Its output is parsed into one of four decision kinds;
@@ -91,23 +92,57 @@ kinds, and schema violations raise `DecisionParseError`; the LLM client makes
 **one** bounded repair attempt before raising `LLMOutputError`. Invalid output is
 never interpreted as a command.
 
-## Tool registry (`gryphos/tools.py`)
+## Tool package and registry (`gryphos/tools/`, `gryphos/analysis.py`)
 
-Every capability is a `ToolSpec` (name, description, purpose, input schema,
-network flag, side effects, timeout, output limit, risk, approval policy,
-executor). `build_registry()` binds executors to `Settings`. `validate_args()`
-rejects unknown properties and missing required fields. Tools never use
-`shell=True`; `nmap_basic` resolves the binary via `shutil.which` and passes a
-fixed argv list.
+Every capability is a `ToolSpec` declaring: name, description, purpose, input
+schema, risk category, side effects, passive/active classification
+(`activity`), network flag, approval policy, timeout, output limit, scope
+requirements, a structured `result_schema`, an executor, and an optional
+`show()` that renders the exact action for approval and display.
+`build_registry(settings)` assembles the fixed set and returns it keyed by
+name; anything not returned there can never run. `validate_args()` rejects
+unknown properties, missing required fields, wrong types, and enum/min/max
+violations, so the model cannot inject flags, executables, or commands. Tools
+never use `shell=True`; binaries are resolved with `shutil.which` and invoked
+with fixed argv lists. `tools/__init__.py` re-exports the stable public API
+(`ToolError`, `ToolResult`, `ToolSpec`, `validate_args`, `build_registry`, and
+the nmap helpers).
 
-Tools and their scope requirements:
+Modules: `base.py` (interfaces, validation, bounded process runner), `net.py`
+(shared bounded HTTP/TLS helpers), `nmap.py`, `http.py`, `tls.py`, `tech.py`,
+`local_ports.py`, `local_audit.py`, `source_scan.py`, `dependency_audit.py`,
+`secret_detect.py`, and `registry.py`. `analysis.py` holds Tool 10.
 
-- `nmap_basic` — literal in-scope IP target.
-- `http_headers` — literal in-scope IP + validated port/scheme; single HEAD request.
-- `http_redirects` — literal in-scope IP URL; manual redirect tracing; every hop
-  re-authorized (off-scope or hostname hops blocked).
-- `tls_cert` — literal in-scope IP; optional SNI hostname (validated).
-- `summarize_evidence` — passive; reads recorded evidence only.
+Registered tools and their policy:
+
+- Active network (approval `explicit`, scope-enforced in code):
+  - `nmap_basic` — literal in-scope IP; fixed argv `-n -Pn -sT -sV --top-ports 100 -T2 --reason`.
+  - `http_headers` — literal in-scope IP + validated port/scheme; single HEAD request; cookies sanitized.
+  - `http_redirects` — literal in-scope IP URL; manual redirect tracing; every hop re-authorized (off-scope or hostname hops blocked).
+  - `tls_cert` — literal in-scope IP; optional SNI hostname (validated); certificate verification never disabled.
+  - `web_tech` — literal in-scope IP; bounded header + ≤8 KiB body fingerprint; no crawling; results labelled *inferred*; optional WhatWeb with stealth flags.
+- Passive local, read-only (no network, approval `none`):
+  - `local_ports` — `ss -ltunp`; classifies listeners local-only / interface-bound / wildcard-exposed.
+  - `local_audit` — one read-only snapshot; modes `services`, `firewall`, `journal`, `lynis`; never elevates privileges.
+  - `source_scan` — Bandit over a chosen directory; optional Semgrep with a **local** rules dir only (offline); source code and the `code` field are stripped from results.
+  - `dependency_audit` — `pip-audit` on a manifest/lockfile; distinguishes *clean* from *data unavailable*; never upgrades.
+  - `secret_detect` — gitleaks `--redact`; secret values, matches, and line text are stripped before output, evidence, logs, or model context; only rule + file:line are reported.
+- Offline analysis: `summarize_evidence` — reads recorded evidence only; produces facts, normalized observations, correlation, and contradictions.
+
+## Evidence analysis (Tool 10, `gryphos/analysis.py`)
+
+Deterministic, offline reasoning over already-collected evidence:
+
+- `normalize_observations` flattens tool results into comparable observations.
+- `correlate` groups observations by target with per-target notes.
+- `detect_contradictions` flags conflicting cross-tool signals (e.g. an HTTP
+  probe succeeding on a port nmap reported closed among the top 100).
+- `compare_sessions` diffs two saved sessions by observation key without
+  re-executing any tool.
+- `summarize_evidence_spec` registers the passive `summarize_evidence` tool.
+
+`reporting.py` surfaces correlation (section 7a) and contradictions (section
+7b) in both the Markdown report and the JSON `report_context`.
 
 ## Scope enforcement (`gryphos/scope.py`)
 
@@ -115,7 +150,12 @@ Tools and their scope requirements:
   URLs, CIDR suffixes, bracket forms, ambiguous short forms (`127.1`), and
   IPv4-mapped IPv6.
 - `validate_target` requires the address to fall inside a same-version network in
-  `GRYPHOS_ALLOWED_TARGETS`. IPv4 and IPv6 are never mixed.
+  `GRYPHOS_ALLOWED_TARGETS`. IPv4 and IPv6 are never mixed. On rejection it
+  names the reserved class (loopback, link-local, cloud metadata, private,
+  CGNAT, documentation/TEST-NET, multicast/future-use) via `classify_ip`, and
+  tells the operator to add the address to the scope explicitly.
+- `classify_ip` is diagnostic only: being private/link-local is not itself a
+  block; an address is reachable only if the scope explicitly permits it.
 - `authorize_url` requires an absolute `http`/`https` URL whose host is a literal
   in-scope IP. **Hostnames are rejected** — there is no DNS resolution, which
   removes DNS-rebinding and redirect-to-name bypasses.

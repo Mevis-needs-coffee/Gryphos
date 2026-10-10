@@ -57,7 +57,7 @@ def test_hostname_target_rejected(settings, registry):
 def test_approved_tool_executes_and_records(settings, registry):
     script = [tool_call("nmap_basic", {"target": "127.0.0.1"}), final("done")]
     agent, session, llm = make_agent(settings, registry, script)
-    with patch("gryphos.tools._run_nmap_basic", return_value=make_nmap_result()) as run_tool:
+    with patch("gryphos.tools.nmap._run_nmap_basic", return_value=make_nmap_result()) as run_tool:
         outcome = agent.run("recon", "127.0.0.1")
     assert outcome.status == "final"
     assert len(session.tool_runs) == 1
@@ -69,7 +69,7 @@ def test_approved_tool_executes_and_records(settings, registry):
 def test_refused_tool_never_executes(settings, registry):
     script = [tool_call("nmap_basic", {"target": "127.0.0.1"}), final("ok")]
     agent, session, llm = make_agent(settings, registry, script, approve=lambda req: False)
-    with patch("gryphos.tools._run_nmap_basic") as run_tool:
+    with patch("gryphos.tools.nmap._run_nmap_basic") as run_tool:
         outcome = agent.run("recon", "127.0.0.1")
     run_tool.assert_not_called()
     assert session.tool_runs == []
@@ -89,7 +89,7 @@ def test_unregistered_tool_rejected(settings, registry):
 def test_tool_with_injected_flags_rejected(settings, registry):
     script = [tool_call("nmap_basic", {"target": "127.0.0.1", "flags": "-sS"}), final("ok")]
     agent, session, llm = make_agent(settings, registry, script)
-    with patch("gryphos.tools._run_nmap_basic") as run_tool:
+    with patch("gryphos.tools.nmap._run_nmap_basic") as run_tool:
         agent.run("recon", "127.0.0.1")
     run_tool.assert_not_called()
 
@@ -97,7 +97,7 @@ def test_tool_with_injected_flags_rejected(settings, registry):
 def test_out_of_scope_proposal_rejected_inside_loop(settings, registry):
     script = [tool_call("nmap_basic", {"target": "8.8.8.8"}), final("ok")]
     agent, session, llm = make_agent(settings, registry, script)
-    with patch("gryphos.tools._run_nmap_basic") as run_tool:
+    with patch("gryphos.tools.nmap._run_nmap_basic") as run_tool:
         agent.run("recon", "127.0.0.1")
     run_tool.assert_not_called()
 
@@ -105,7 +105,7 @@ def test_out_of_scope_proposal_rejected_inside_loop(settings, registry):
 def test_target_mismatch_with_session_rejected(settings, registry):
     script = [tool_call("nmap_basic", {"target": "::1"}), final("ok")]
     agent, session, llm = make_agent(settings, registry, script)
-    with patch("gryphos.tools._run_nmap_basic") as run_tool:
+    with patch("gryphos.tools.nmap._run_nmap_basic") as run_tool:
         agent.run("recon", "127.0.0.1")
     run_tool.assert_not_called()
 
@@ -204,7 +204,7 @@ def test_keyboard_interrupt_during_approval_cancels(settings, registry):
         settings, registry, [tool_call("nmap_basic", {"target": "127.0.0.1"}), final()],
         approve=approve,
     )
-    with patch("gryphos.tools._run_nmap_basic") as run_tool:
+    with patch("gryphos.tools.nmap._run_nmap_basic") as run_tool:
         outcome = agent.run("recon", "127.0.0.1")
     run_tool.assert_not_called()
     assert outcome.status == "cancelled"
@@ -213,7 +213,7 @@ def test_keyboard_interrupt_during_approval_cancels(settings, registry):
 def test_passive_tool_runs_without_network(settings, registry):
     script = [tool_call("summarize_evidence", {}), final("summarized")]
     agent, session, llm = make_agent(settings, registry, script)
-    with patch("gryphos.tools.requests.request") as req:
+    with patch("gryphos.tools.net.requests.request") as req:
         outcome = agent.run("summarize", "127.0.0.1")
     req.assert_not_called()
     assert outcome.status == "final"

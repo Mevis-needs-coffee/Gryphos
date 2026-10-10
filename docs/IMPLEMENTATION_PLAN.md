@@ -37,7 +37,9 @@ Baseline verification: modules import, `validate_target` accepts `127.0.0.1` and
 - [x] P1b: `llm.py` — model catalog fetch + in-memory TTL cache, exact-ID selection with validation and last-known-good preservation, classified API errors, structured `decide()` returning typed decisions, bounded JSON repair retry
 - [x] P2a: `models.py` — Pydantic decision schema (`tool_call`/`final`/`clarification`/`error`), strict JSON extraction parser (fences, prose, malformed rejection)
 - [x] P2b: `agent.py` — bounded loop with step limit, total time budget, duplicate-call fingerprints, consecutive-failure abort, clarification prompts, refusal/cancel handling, session recording hooks, registry-only tool dispatch
-- [x] P4/P5a: `tools.py` — `ToolSpec` registry (name, purpose, schema, network_active, side effects, timeout, output limit, risk, approval policy, executor); preserved `nmap_basic`; new `http_headers`, `tls_cert`, `http_redirects`, `summarize_evidence` (passive); every network tool enforces literal-IP scope; URL policy = literal in-scope IP only; manual redirect hops each re-validated
+- [x] P4/P5a: `gryphos/tools.py` — `ToolSpec` registry (name, purpose, schema, network_active, side effects, timeout, output limit, risk, approval policy, executor); preserved `nmap_basic`; new `http_headers`, `tls_cert`, `http_redirects`, `summarize_evidence` (passive); every network tool enforces literal-IP scope; URL policy = literal in-scope IP only; manual redirect hops each re-validated
+- [x] P12 (Phase Four): modular `gryphos/tools/` package — split `tools.py` into `base.py` (interfaces, validation, bounded process runner), `net.py` (shared bound HTTP/TLS helpers), one module per tool, and `registry.py`; each tool declares name/description/purpose/input schema/scope requirements/risk/passive-active/network activity/timeout/output limit/approval policy/side effects/result schema/executor/exact-action display; added passive tools `local_ports`, `local_audit`, `source_scan`, `dependency_audit`, `secret_detect` (secret values redacted and never retained); added active `web_tech` (bounded, results labelled inferred); unknown tool names rejected, model can never name an executable or build a command
+- [x] P13 (Phase Four): `gryphos/analysis.py` — Tool 10 offline evidence analysis: `normalize_observations`, `correlate`, `detect_contradictions`, `compare_sessions`, and the passive `summarize_evidence` spec; `reporting.py` surfaces correlation (§7a) and contradictions (§7b) in Markdown and JSON; `scope.py` gains `classify_ip` reserved-address diagnostics; `tools/__init__.py` re-exports the stable legacy API
 - [x] P5b: `approval.py` — approval requests with SHA-256 fingerprints over canonical (tool, args, target), default deny, single use, new approval required when any security-relevant arg changes
 - [x] P5c: `scope.py` — IPv4/IPv6 deliberate handling, normalization, ambiguity rejection, URL authorization helper
 - [x] P6: `session.py` — session records (id, ISO-8601 tz timestamps, objective, scope snapshot, model, history, proposals, approvals, tool runs, findings, errors, final assessment, report paths), atomic writes, corrupt-file tolerance, old-format loading, listing
@@ -52,7 +54,7 @@ Baseline verification: modules import, `validate_target` accepts `127.0.0.1` and
 Verified via the automated suite (offline) plus targeted live checks where a key
 was available:
 
-- **Automated:** `python -m pytest` → 182 passed; `ruff check gryphos/ main.py tests/` → clean.
+- **Automated:** `python -m pytest` → 205 passed; `ruff check gryphos/ main.py tests/` → clean.
 - **Live OpenRouter (manual, not required by tests):** catalog fetch returned 458
   models with exact IDs and free flags; exact-ID selection succeeded; a concrete
   free model returned valid decision JSON through `_create`; a 429 rate-limit and

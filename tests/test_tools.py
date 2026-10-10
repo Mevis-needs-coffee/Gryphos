@@ -27,7 +27,19 @@ SCOPE = ("127.0.0.1/32",)
 # --- registry ---------------------------------------------------------------
 
 def test_registry_contains_expected_tools(registry):
-    assert set(registry) == {"nmap_basic", "http_headers", "http_redirects", "tls_cert", "summarize_evidence"}
+    assert set(registry) == {
+        "nmap_basic",
+        "http_headers",
+        "http_redirects",
+        "tls_cert",
+        "web_tech",
+        "local_ports",
+        "local_audit",
+        "source_scan",
+        "dependency_audit",
+        "secret_detect",
+        "summarize_evidence",
+    }
 
 
 def test_every_tool_requires_or_declares_policy(registry):
@@ -77,8 +89,8 @@ def test_validate_args_rejects_extra_port_on_nmap(registry):
 # --- nmap -------------------------------------------------------------------
 
 def test_nmap_argv_is_fixed_and_safe():
-    with patch("gryphos.tools.shutil.which", return_value="/usr/bin/nmap"), \
-         patch("gryphos.tools.subprocess.run") as run:
+    with patch("gryphos.tools.base.shutil.which", return_value="/usr/bin/nmap"), \
+         patch("gryphos.tools.base.subprocess.run") as run:
         run.return_value = subprocess.CompletedProcess(
             args=[], returncode=0, stdout="PORT STATE\n80/tcp open http\n", stderr=""
         )
@@ -93,21 +105,21 @@ def test_nmap_argv_is_fixed_and_safe():
 
 
 def test_nmap_out_of_scope_never_executes():
-    with patch("gryphos.tools.subprocess.run") as run:
+    with patch("gryphos.tools.base.subprocess.run") as run:
         with pytest.raises(ScopeError):
             _run_nmap_basic("8.8.8.8", SCOPE, timeout=5, max_output_chars=1000)
         run.assert_not_called()
 
 
 def test_nmap_hostname_never_executes():
-    with patch("gryphos.tools.subprocess.run") as run:
+    with patch("gryphos.tools.base.subprocess.run") as run:
         with pytest.raises(ScopeError):
             _run_nmap_basic("evil.example.com", SCOPE, timeout=5, max_output_chars=1000)
         run.assert_not_called()
 
 
 def test_nmap_missing_binary():
-    with patch("gryphos.tools.shutil.which", return_value=None):
+    with patch("gryphos.tools.base.shutil.which", return_value=None):
         with pytest.raises(ToolError, match="not installed"):
             _run_nmap_basic("127.0.0.1", SCOPE, timeout=5, max_output_chars=1000)
 
@@ -117,8 +129,8 @@ def test_nmap_timeout_returns_result_not_crash():
         exc = subprocess.TimeoutExpired(cmd="nmap", timeout=5)
         exc.stdout = "partial"
         raise exc
-    with patch("gryphos.tools.shutil.which", return_value="/usr/bin/nmap"), \
-         patch("gryphos.tools.subprocess.run", side_effect=fake_run):
+    with patch("gryphos.tools.base.shutil.which", return_value="/usr/bin/nmap"), \
+         patch("gryphos.tools.base.subprocess.run", side_effect=fake_run):
         result = _run_nmap_basic("127.0.0.1", SCOPE, timeout=5, max_output_chars=1000)
         assert result.returncode is None
         assert "Timed out" in result.output
@@ -126,8 +138,8 @@ def test_nmap_timeout_returns_result_not_crash():
 
 
 def test_nmap_output_truncated():
-    with patch("gryphos.tools.shutil.which", return_value="/usr/bin/nmap"), \
-         patch("gryphos.tools.subprocess.run") as run:
+    with patch("gryphos.tools.base.shutil.which", return_value="/usr/bin/nmap"), \
+         patch("gryphos.tools.base.subprocess.run") as run:
         run.return_value = subprocess.CompletedProcess(
             args=[], returncode=0, stdout="X" * 5000, stderr=""
         )
@@ -158,7 +170,7 @@ class FakeResponse:
 
 def test_http_headers_scope_enforced(registry):
     spec = registry["http_headers"]
-    with patch("gryphos.tools.requests.request") as req:
+    with patch("gryphos.tools.net.requests.request") as req:
         with pytest.raises(ScopeError):
             spec.execute({"target": "8.8.8.8", "port": 80, "scheme": "http"}, SCOPE, [])
         req.assert_not_called()
@@ -167,7 +179,7 @@ def test_http_headers_scope_enforced(registry):
 def test_http_headers_reports_missing_hardening(registry):
     spec = registry["http_headers"]
     fake = FakeResponse(status=200, headers={"Server": "nginx/1.24", "Content-Type": "text/html"})
-    with patch("gryphos.tools.requests.request", return_value=fake):
+    with patch("gryphos.tools.net.requests.request", return_value=fake):
         result = spec.execute({"target": "127.0.0.1", "port": 80, "scheme": "http"}, SCOPE, [])
     assert result.data["status_code"] == 200
     assert "content-security-policy" in result.data["missing_hardening_headers"]
@@ -176,7 +188,7 @@ def test_http_headers_reports_missing_hardening(registry):
 
 def test_http_headers_request_failure_handled(registry):
     spec = registry["http_headers"]
-    with patch("gryphos.tools.requests.request", side_effect=requests.ConnectionError("boom")):
+    with patch("gryphos.tools.net.requests.request", side_effect=requests.ConnectionError("boom")):
         result = spec.execute({"target": "127.0.0.1", "port": 80, "scheme": "http"}, SCOPE, [])
     assert result.error == "ConnectionError"
     assert "Request failed" in result.output
@@ -185,7 +197,7 @@ def test_http_headers_request_failure_handled(registry):
 def test_http_redirects_blocks_offscope_hop(registry):
     spec = registry["http_redirects"]
     redirect = FakeResponse(status=302, headers={"Location": "http://8.8.8.8/steal"})
-    with patch("gryphos.tools.requests.request", return_value=redirect):
+    with patch("gryphos.tools.net.requests.request", return_value=redirect):
         result = spec.execute(
             {"target": "127.0.0.1", "port": 80, "scheme": "http", "path": "/"}, SCOPE, []
         )
@@ -198,7 +210,7 @@ def test_http_redirects_blocks_offscope_hop(registry):
 def test_http_redirects_blocks_hostname_hop(registry):
     spec = registry["http_redirects"]
     redirect = FakeResponse(status=301, headers={"Location": "http://evil.example.com/x"})
-    with patch("gryphos.tools.requests.request", return_value=redirect):
+    with patch("gryphos.tools.net.requests.request", return_value=redirect):
         result = spec.execute(
             {"target": "127.0.0.1", "port": 80, "scheme": "http", "path": "/"}, SCOPE, []
         )
@@ -211,7 +223,7 @@ def test_http_redirects_traces_inscoop_chain(registry):
         FakeResponse(status=301, headers={"Location": "http://127.0.0.1:8080/new"}),
         FakeResponse(status=200, headers={"Content-Type": "text/html"}),
     ]
-    with patch("gryphos.tools.requests.request", side_effect=responses) as req:
+    with patch("gryphos.tools.net.requests.request", side_effect=responses) as req:
         result = spec.execute(
             {"target": "127.0.0.1", "port": 80, "scheme": "http", "path": "/"}, SCOPE, []
         )
@@ -223,7 +235,7 @@ def test_http_redirects_traces_inscoop_chain(registry):
 
 def test_tls_cert_handshake_failure_handled(registry):
     spec = registry["tls_cert"]
-    with patch("gryphos.tools.socket.create_connection", side_effect=OSError("refused")):
+    with patch("gryphos.tools.net.socket.create_connection", side_effect=OSError("refused")):
         result = spec.execute({"target": "127.0.0.1", "port": 443}, SCOPE, [])
     assert result.error is not None
     assert "handshake failed" in result.output
@@ -231,7 +243,7 @@ def test_tls_cert_handshake_failure_handled(registry):
 
 def test_tls_cert_scope_enforced(registry):
     spec = registry["tls_cert"]
-    with patch("gryphos.tools.socket.create_connection") as conn:
+    with patch("gryphos.tools.net.socket.create_connection") as conn:
         with pytest.raises(ScopeError):
             spec.execute({"target": "8.8.8.8", "port": 443}, SCOPE, [])
         conn.assert_not_called()
@@ -255,8 +267,8 @@ def test_summarize_evidence_no_network(registry):
         "returncode": 0, "output": "...",
         "data": {"open_ports": [{"port": "80/tcp", "service": "http"}], "non_open_count": 99},
     }]
-    with patch("gryphos.tools.requests.request") as req, \
-         patch("gryphos.tools.subprocess.run") as run:
+    with patch("gryphos.tools.net.requests.request") as req, \
+         patch("gryphos.tools.base.subprocess.run") as run:
         result = spec.execute({}, SCOPE, evidence)
         req.assert_not_called()
         run.assert_not_called()

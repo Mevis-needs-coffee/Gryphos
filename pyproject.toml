@@ -24,7 +24,6 @@ ignore = [
     "S101",    # assert is the point of tests
     "E501",    # long assertion strings
 ]
-"gryphos/tools.py" = ["BLE001"]  # defensive boundaries around third-party I/O
 "gryphos/logging_setup.py" = ["BLE001", "SIM108"]
 "gryphos/agent.py" = ["BLE001"]
 "gryphos/llm.py" = ["E501"]  # system prompt embeds long JSON schema examples

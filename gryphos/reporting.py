@@ -14,6 +14,7 @@ import re
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .analysis import correlate, detect_contradictions
 from .session import Session
 
 SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "informational": 4}
@@ -121,6 +122,66 @@ def extract_confirmed_observations(session: Session) -> list[dict]:
                 "observation": "Session evidence was summarized (passive, no new traffic).",
                 "evidence_ref": run,
             })
+        elif tool == "web_tech":
+            techs = [t.get("name") for t in (data.get("technologies") or []) if t.get("name")]
+            if techs:
+                observations.append({
+                    "source": "web_tech",
+                    "observation": f"Technology indicators on {target} (inferred, not confirmed): "
+                                   + ", ".join(techs) + ".",
+                    "evidence_ref": run,
+                })
+        elif tool == "local_ports":
+            counts = data.get("counts") or {}
+            observations.append({
+                "source": "local_ports",
+                "observation": (
+                    f"Local listening sockets: {counts.get('total', 0)} total, "
+                    f"{counts.get('exposed_wildcard', 0)} bound to all interfaces (wildcard)."
+                ),
+                "evidence_ref": run,
+            })
+        elif tool == "local_audit":
+            observations.append({
+                "source": "local_audit",
+                "observation": (
+                    f"Read-only local audit mode {data.get('mode')!r} executed "
+                    f"(return code {run.get('returncode')}); no changes were made."
+                ),
+                "evidence_ref": run,
+            })
+        elif tool == "source_scan":
+            counts = data.get("counts") or {}
+            observations.append({
+                "source": "source_scan",
+                "observation": (
+                    f"Static analysis of {data.get('project_dir')}: "
+                    f"{counts.get('bandit', 0)} bandit and {counts.get('semgrep', 0)} "
+                    "semgrep candidate finding(s); source was not transmitted."
+                ),
+                "evidence_ref": run,
+            })
+        elif tool == "dependency_audit":
+            if data.get("data_unavailable"):
+                text = (f"Dependency audit of {data.get('manifest')} could not complete "
+                        "(data unavailable); coverage is unknown, not 'clean'.")
+            elif data.get("vulnerable_packages"):
+                text = (f"Dependency audit of {data.get('manifest')} found "
+                        f"{data.get('vulnerable_packages')} vulnerable package(s); "
+                        "no changes were applied.")
+            else:
+                text = f"Dependency audit of {data.get('manifest')}: no known vulnerabilities."
+            observations.append({"source": "dependency_audit", "observation": text, "evidence_ref": run})
+        elif tool == "secret_detect":
+            total = (data.get("counts") or {}).get("total", 0)
+            observations.append({
+                "source": "secret_detect",
+                "observation": (
+                    f"Secret scan of {data.get('project_dir')} reported {total} "
+                    "potential secret(s); values are redacted and were not retained."
+                ),
+                "evidence_ref": run,
+            })
     return observations
 
 
@@ -148,6 +209,8 @@ def build_report_context(session: Session) -> dict:
         "approved": approved,
         "declined": declined,
         "not_performed": not_performed,
+        "correlation": correlate(session.tool_runs),
+        "contradictions": detect_contradictions(session.tool_runs),
     }
 
 
@@ -251,6 +314,24 @@ def render_markdown(session: Session, ctx: dict) -> str:
     else:
         add("_No confirmed observations; no tool evidence was recorded._")
     add("")
+    if ctx["correlation"]:
+        add("### 7a. Cross-tool correlation")
+        add("")
+        for group in ctx["correlation"]:
+            add(f"- `{group['target']}` — tools: {', '.join(group['tools'])} "
+                f"({group['observation_count']} observation(s))")
+            for note in group["notes"]:
+                add(f"  - {note}")
+        add("")
+    if ctx["contradictions"]:
+        add("### 7b. Cross-tool contradictions")
+        add("")
+        add("_Conflicting signals between tools are listed here for operator review; "
+            "they are not resolved automatically._")
+        add("")
+        for item in ctx["contradictions"]:
+            add(f"- **[{item.get('severity', 'medium')}]** {item['message']}")
+        add("")
 
     add("## 8. Findings (model interpretations)")
     add("")
@@ -330,6 +411,8 @@ def generate_reports(session: Session, directory: Path) -> tuple[Path, Path]:
         ],
         "tools_executed": ctx["tools_executed"],
         "not_performed": ctx["not_performed"],
+        "correlation": ctx["correlation"],
+        "contradictions": ctx["contradictions"],
     }
     session.report_json = str(json_path)
     session.report_markdown = str(md_path)

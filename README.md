@@ -41,17 +41,31 @@ arbitrary shell commands and will not scan anything outside your scope.
 
 ## Registered tools
 
-| Tool | Network | Risk | Approval | Purpose |
-|---|---|---|---|---|
-| `nmap_basic` | yes | low | explicit | Top-100 TCP connect scan with service detection (`-n -Pn -sT -sV --top-ports 100 -T2 --reason`). |
-| `http_headers` | yes | low | explicit | One HTTP HEAD request; reports security headers, tech hints, missing hardening. |
-| `http_redirects` | yes | low | explicit | Traces up to 5 redirect hops; every hop must be an in-scope literal IP. |
-| `tls_cert` | yes | low | explicit | TLS handshake; certificate subject/issuer/validity/SANs. |
-| `summarize_evidence` | no | informational | none | Passively summarizes recorded evidence. |
+Gryphos exposes a fixed, modular registry of 11 tools. Active network tools
+require explicit approval and enforce scope in code; passive local tools are
+read-only and make no network calls.
 
+| Tool | Activity | Network | Risk | Approval | Purpose |
+|---|---|---|---|---|---|
+| `nmap_basic` | active | yes | low | explicit | Top-100 TCP connect scan with service detection (`-n -Pn -sT -sV --top-ports 100 -T2 --reason`). |
+| `http_headers` | active | yes | low | explicit | One HTTP HEAD request; reports security headers, tech hints, missing hardening. |
+| `http_redirects` | active | yes | low | explicit | Traces up to 5 redirect hops; every hop must be an in-scope literal IP. |
+| `tls_cert` | active | yes | low | explicit | TLS handshake; certificate subject/issuer/validity/SANs; verification never disabled. |
+| `web_tech` | active | yes | low | explicit | Bounded header + ≤8 KiB body fingerprint; no crawling; results labelled inferred. |
+| `local_ports` | passive | no | informational | none | `ss -ltunp`; classifies listeners local-only / interface-bound / wildcard-exposed. |
+| `local_audit` | passive | no | informational | none | One read-only snapshot: `services`, `firewall`, `journal`, `lynis`. Never elevates privileges. |
+| `source_scan` | passive | no | low | none | Bandit (and optional offline Semgrep with a local rules dir); findings are file:line only. |
+| `dependency_audit` | passive | no | informational | none | `pip-audit` on a manifest/lockfile; distinguishes clean from data-unavailable; never upgrades. |
+| `secret_detect` | passive | no | low | none | gitleaks `--redact`; only rule + file:line are reported; values are never retained. |
+| `summarize_evidence` | passive | no | informational | none | Offline summary, correlation, and contradiction detection over recorded evidence. |
+
+Each tool declares its name, purpose, input schema, scope requirements, risk,
+passive/active classification, network activity, timeout, output limit,
+approval policy, structured result format, and an exact-action display.
 Arguments are validated against fixed schemas; unknown flags/arguments are
-rejected. URL-based tools accept **literal in-scope IPs only** (no hostnames),
-and redirects to out-of-scope or hostname destinations are blocked.
+rejected and the model can never name an executable or construct a command.
+URL-based tools accept **literal in-scope IPs only** (no hostnames), and
+redirects to out-of-scope or hostname destinations are blocked.
 
 ## Architecture
 
@@ -60,7 +74,8 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). In short:
 ```
 CLI (gryphos/cli.py) → Agent loop (gryphos/agent.py)
     → LLM client (gryphos/llm.py) → structured decision (gryphos/models.py)
-    → validation (scope.py, tools.py, approval.py)
+    → validation (scope.py, tools/base.py, approval.py)
+    → analysis (gryphos/analysis.py)
     → execution of registered tool → evidence (session.py, reporting.py)
 ```
 
@@ -265,6 +280,8 @@ ruff check gryphos/ main.py tests/
 - Only the registered tools can run; there is no arbitrary command execution by design.
 - URL tools accept literal in-scope IPs only (hostname-based vhosts are not supported).
 - `nmap_basic` scans only the top 100 TCP ports; carve this out in reports.
+- `web_tech` fingerprints are **inferred** from headers and a small body sample and can be spoofed; treat them as hints.
+- Passive local tools (`local_ports`, `local_audit`) inspect only the host Gryphos runs on; `source_scan`, `dependency_audit`, and `secret_detect` need their external tools (Bandit/Semgrep, pip-audit, gitleaks) installed locally.
 - Model findings are interpretations, not proof; verify manually.
 - Free-tier models may be unavailable, rate-limited, or unable to follow the
   required JSON format; select a different model when prompted.

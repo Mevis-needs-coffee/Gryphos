@@ -318,16 +318,8 @@ class Agent:
         ))
 
     def _display_for(self, spec: ToolSpec, args: dict) -> str:
-        if spec.name == "nmap_basic":
-            return f"nmap -n -Pn -sT -sV --top-ports 100 -T2 --reason {args.get('target', '?')}"
-        if spec.name in {"http_headers", "http_redirects"}:
-            scheme = args.get("scheme", "http")
-            port = args.get("port", 80)
-            path = args.get("path", "/") if spec.name == "http_redirects" else "/"
-            method = "HEAD" if spec.name == "http_headers" else "GET"
-            return f"HTTP {method} {scheme}://{args.get('target', '?')}:{port}{path}"
-        if spec.name == "tls_cert":
-            return f"TLS handshake {args.get('target', '?')}:{args.get('port', 443)}"
+        if spec.show is not None:
+            return spec.show(args)
         return f"{spec.name}({args})"
 
     def _finalize(self, decision: FinalDecision) -> AgentOutcome:

@@ -62,6 +62,48 @@ def normalize_ip(target: str) -> tuple[str, int]:
     return str(address), address.version
 
 
+_RESERVED_NETS: list[tuple[str, ipaddress.IPv4Network | ipaddress.IPv6Network]] = [
+    ("unspecified", ipaddress.ip_network("0.0.0.0/8")),
+    ("loopback", ipaddress.ip_network("127.0.0.0/8")),
+    ("loopback", ipaddress.ip_network("::1/128")),
+    ("cloud_metadata (link-local)", ipaddress.ip_network("169.254.169.254/32")),
+    ("link-local", ipaddress.ip_network("169.254.0.0/16")),
+    ("link-local", ipaddress.ip_network("fe80::/10")),
+    ("private", ipaddress.ip_network("10.0.0.0/8")),
+    ("private", ipaddress.ip_network("172.16.0.0/12")),
+    ("private", ipaddress.ip_network("192.168.0.0/16")),
+    ("private", ipaddress.ip_network("fc00::/7")),
+    ("CGNAT (shared)", ipaddress.ip_network("100.64.0.0/10")),
+    ("reserved/testing", ipaddress.ip_network("192.0.0.0/24")),
+    ("reserved/testing", ipaddress.ip_network("198.18.0.0/15")),
+    ("documentation (TEST-NET)", ipaddress.ip_network("192.0.2.0/24")),
+    ("documentation (TEST-NET)", ipaddress.ip_network("198.51.100.0/24")),
+    ("documentation (TEST-NET)", ipaddress.ip_network("203.0.113.0/24")),
+    ("multicast/reserved", ipaddress.ip_network("224.0.0.0/4")),
+    ("multicast/reserved", ipaddress.ip_network("ff00::/8")),
+    ("reserved (future use)", ipaddress.ip_network("240.0.0.0/4")),
+]
+
+
+def classify_ip(network: ipaddress.IPv4Address | ipaddress.IPv6Address) -> list[str]:
+    """Classify an address into reserved/private/link-local/metadata categories.
+
+    Used for diagnostics and for policy messaging. Being 'private' or
+    'link-local' is NOT a block by itself: an address is only reachable when
+    the configured scope explicitly permits it. This function only names the
+    category for clear errors and reporting.
+    """
+    categories: list[str] = []
+    for label, net in _RESERVED_NETS:
+        if (
+            net.version == network.version
+            and network in net
+            and label not in categories
+        ):
+            categories.append(label)
+    return categories
+
+
 def validate_target(target: str, scope_items: tuple[str, ...]) -> str:
     """Validate one literal target IP against the configured scope.
 
@@ -73,8 +115,13 @@ def validate_target(target: str, scope_items: tuple[str, ...]) -> str:
     for net in networks:
         if net.version == version and address in net:
             return normalized
+    categories = classify_ip(address)
+    hint = ""
+    if categories:
+        hint = f" It is classified as: {', '.join(categories)}."
     raise ScopeError(
         f"{normalized} is outside the configured authorized scope. "
+        f"To target it, add it to GRYPHOS_ALLOWED_TARGETS explicitly.{hint} "
         f"Allowed scope: {', '.join(scope_items)}"
     )
 
