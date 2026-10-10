@@ -1,0 +1,36 @@
+# Secrets — NEVER commit. Copy .env.example to .env and fill in real values.
+.env
+.env.*
+!.env.example
+
+# Virtual environment / interpreter caches
+.venv/
+__pycache__/
+*.pyc
+
+# Local session evidence and reports (may contain host/scan data)
+reports/*
+!reports/.gitkeep
+
+# Diagnostic logs
+logs/
+*.log
+
+# Test / build caches
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# Editor / OS noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Atomic-write temp files (never committed while a write is in flight)
+*.json.tmp
+*.md.tmp

@@ -1,0 +1,21 @@
+# Normalize checkouts to LF regardless of contributor OS (Windows/WSL/macOS).
+* text=auto eol=lf
+
+# Explicitly text for source/config so diffing stays clean.
+*.py   text eol=lf
+*.md   text eol=lf
+*.toml text eol=lf
+*.txt  text eol=lf
+*.example text eol=lf
+*.json text eol=lf
+*.gitignore text eol=lf
+*.gitattributes text eol=lf
+
+# Generated/locally-specific artifacts: never ship in source archives.
+.venv export-ignore
+reports export-ignore
+logs export-ignore
+__pycache__ export-ignore
+.pytest_cache export-ignore
+.ruff_cache export-ignore
+.env export-ignore

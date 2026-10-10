@@ -1,0 +1,68 @@
+# Gryphos — Implementation Plan
+
+## Audit of the existing repository (Phase 0)
+
+Inspected 2026-10-10. The repository is a small working starter:
+
+| File | State |
+|---|---|
+| `main.py` | Typer app + interactive REPL; commands: help, models, model, scope, assess, exit. Report writing inlined in the REPL. |
+| `gryphos/config.py` | `Settings` dataclass from env; numeric parsing crashes with a raw `ValueError` on garbage input; no API base/timeout/retry settings. |
+| `gryphos/llm.py` | OpenRouter client via `openai`; `list_models()`; `decide()` returns raw dict; JSON parsing handles fences and prose; error handling covers auth/rate-limit/generic APIError only (no 400/403/timeout/context-length distinction); no catalog caching; no model-ID validation. |
+| `gryphos/agent.py` | Bounded loop (max steps), approval via `Confirm` (default no), duplicate nmap detection, scope re-check of proposed target. |
+| `gryphos/scope.py` | `ipaddress`-based; literal IP only; CIDR scope membership check. Works correctly. |
+| `gryphos/tools.py` | Single tool `nmap_basic` with fixed argv, `shell=False`, timeout, output truncation. Works correctly. |
+| `requirements.txt` | openai, python-dotenv, rich, typer, requests — all installed in `.venv` (Python 3.14.7). pytest added as dev dependency. pydantic 2.14 present transitively via openai; used for decision schemas. |
+| `reports/` | Three prior sessions (old flat format: started_at/model/objective/target/evidence). Must be preserved and remain loadable. |
+| `.env` | Exists locally with a live key. Never overwrite, never log, never commit (already gitignored). |
+| Git | Not a git repository on this filesystem. |
+
+Baseline verification: modules import, `validate_target` accepts `127.0.0.1` and rejects hostnames and out-of-scope IPs; nmap 7.99 present at `/usr/bin/nmap`. No automated tests existed.
+
+### Actual defects / gaps found
+
+1. `config.py` crashes on non-numeric env values; no configurable API base, request timeout, retries, time budget, or catalog cache.
+2. `llm.py` accepts any `provider/model` string as a model; no catalog validation, no caching, no distinction between 400/401/403/429/5xx/timeout/context-length errors.
+3. Decision parsing raises `RuntimeError` for everything; no `clarification`/`error` decision kinds; no bounded repair retry.
+4. `agent.py` has no total time budget, no consecutive-failure abort, no clarification flow, no session persistence, hard-coded to `nmap_basic`, approval is not fingerprinted to exact arguments (a model could change args after approval within the same prompt shape — currently mitigated only because args are fixed, but the new multi-tool world needs fingerprints).
+5. CLI rejects ordinary conversational input with `Unknown command`; missing `clear`, `status`, `sessions`, `history`, `report`, `config`, `tools`; report generation is inlined and omits approvals, findings structure, limitations.
+6. No sessions module, no atomic writes, no corrupt-file handling, no way to list/inspect past sessions.
+7. No logging/observability, no secret redaction helpers.
+8. No tests, no architecture documentation.
+
+## Ordered implementation checklist
+
+- [x] P0: audit, this plan
+- [x] P1a: `config.py` — safe numeric parsing with bounds, new settings (api_base, request_timeout, max_retries, time_budget, catalog_cache_ttl), never print secrets
+- [x] P1b: `llm.py` — model catalog fetch + in-memory TTL cache, exact-ID selection with validation and last-known-good preservation, classified API errors, structured `decide()` returning typed decisions, bounded JSON repair retry
+- [x] P2a: `models.py` — Pydantic decision schema (`tool_call`/`final`/`clarification`/`error`), strict JSON extraction parser (fences, prose, malformed rejection)
+- [x] P2b: `agent.py` — bounded loop with step limit, total time budget, duplicate-call fingerprints, consecutive-failure abort, clarification prompts, refusal/cancel handling, session recording hooks, registry-only tool dispatch
+- [x] P4/P5a: `tools.py` — `ToolSpec` registry (name, purpose, schema, network_active, side effects, timeout, output limit, risk, approval policy, executor); preserved `nmap_basic`; new `http_headers`, `tls_cert`, `http_redirects`, `summarize_evidence` (passive); every network tool enforces literal-IP scope; URL policy = literal in-scope IP only; manual redirect hops each re-validated
+- [x] P5b: `approval.py` — approval requests with SHA-256 fingerprints over canonical (tool, args, target), default deny, single use, new approval required when any security-relevant arg changes
+- [x] P5c: `scope.py` — IPv4/IPv6 deliberate handling, normalization, ambiguity rejection, URL authorization helper
+- [x] P6: `session.py` — session records (id, ISO-8601 tz timestamps, objective, scope snapshot, model, history, proposals, approvals, tool runs, findings, errors, final assessment, report paths), atomic writes, corrupt-file tolerance, old-format loading, listing
+- [x] P7: `reporting.py` — Markdown + JSON reports with executive summary, metadata, scope, methodology, tools, approvals, findings (severity/confidence/evidence), remediation, limitations, errors; confirmed observations separated from model interpretations; untrusted output safely fenced
+- [x] P8: `logging_setup.py` — file logging under `logs/`, secret-redaction filter
+- [x] P3/P9: `cli.py` REPL — all built-in commands, natural-language routing to agent, typo suggestions, empty-input handling, clean Ctrl+C/EOF shutdown, status/banner; `main.py` thin entry point
+- [x] P10: `tests/` — pytest suite covering config, scope, parsing, llm catalog/errors (mocked), approval, tools, agent loop, sessions, reporting, CLI dispatch; run + fix; `requirements-dev.txt`
+- [x] P11: `README.md` rewrite, `docs/ARCHITECTURE.md`, `.env.example` update, `.gitignore` for logs
+
+## Acceptance criteria status
+
+Verified via the automated suite (offline) plus targeted live checks where a key
+was available:
+
+- **Automated:** `python -m pytest` → 182 passed; `ruff check gryphos/ main.py tests/` → clean.
+- **Live OpenRouter (manual, not required by tests):** catalog fetch returned 458
+  models with exact IDs and free flags; exact-ID selection succeeded; a concrete
+  free model returned valid decision JSON through `_create`; a 429 rate-limit and
+  a 404 unavailable-model error were classified correctly; free-tier models
+  intermittently returned empty/non-conforming output, which the client reported
+  as `invalid_output` with a "try a different model" hint (graceful, as designed).
+- **Live CLI:** `python main.py start` handled `status`, `tools`, `scope`,
+  `config` (key redacted), `sessions` (loaded 3 pre-existing legacy sessions) and
+  `exit` cleanly.
+
+No live assessment was run against a target during this work; the tool-execution
+path is covered by mocked tests and scope-enforcement tests.
+

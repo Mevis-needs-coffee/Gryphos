@@ -1,0 +1,341 @@
+"""Professional assessment reports.
+
+Produces a Markdown report and matching JSON evidence file for each completed
+assessment. Confirmed observations (deterministically parsed from tool
+output) are presented separately from model-generated interpretations.
+Untrusted tool output is fenced safely inside Markdown.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+from datetime import UTC, datetime
+from pathlib import Path
+
+from .session import Session
+
+SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "informational": 4}
+
+
+def _atomic_write(path: Path, content: str) -> None:
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(content, encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _fence(text: str) -> str:
+    """Safely fence untrusted content that may itself contain backticks."""
+    body = text.replace("\r\n", "\n")
+    longest = max((len(m) for m in re.findall(r"`+", body)), default=0)
+    fence = "`" * max(3, longest + 1)
+    return f"{fence}text\n{body}\n{fence}"
+
+
+def _describe_port(port: dict) -> str:
+    text = str(port.get("port", "?"))
+    service = port.get("service")
+    if service:
+        text += f" ({service}"
+        if port.get("version"):
+            text += f" {port['version']}"
+        text += ")"
+    return text
+
+
+def _describe_hop(hop: dict) -> str:
+    status = hop.get("status", hop.get("error", "?"))
+    return f"{hop['scheme']}://{hop['host']}:{hop['port']}{hop['path']} ({status})"
+
+
+def extract_confirmed_observations(session: Session) -> list[dict]:
+    """Deterministically derive observations from recorded tool evidence."""
+    observations: list[dict] = []
+    for run in session.tool_runs:
+        tool = run.get("tool", "?")
+        target = run.get("target", "?")
+        data = run.get("data") or {}
+        if tool == "nmap_basic":
+            open_ports = data.get("open_ports") or []
+            if open_ports:
+                listing = ", ".join(_describe_port(p) for p in open_ports)
+                observations.append({
+                    "source": "nmap_basic",
+                    "observation": f"Open TCP ports on {target}: {listing}.",
+                    "evidence_ref": run,
+                })
+            elif run.get("returncode") == 0:
+                observations.append({
+                    "source": "nmap_basic",
+                    "observation": (
+                        f"The top 100 TCP ports on {target} were scanned; none were open "
+                        f"(closed or filtered). Ports outside this set were not tested."
+                    ),
+                    "evidence_ref": run,
+                })
+            elif run.get("error"):
+                observations.append({
+                    "source": "nmap_basic",
+                    "observation": f"Scan of {target} did not complete: {run.get('error')}.",
+                    "evidence_ref": run,
+                })
+        elif tool == "http_headers":
+            status = data.get("status_code")
+            missing = data.get("missing_hardening_headers") or []
+            hints = data.get("technology_hints") or []
+            parts = [f"HTTP HEAD to {target} returned status {status}."]
+            if missing:
+                parts.append("Missing hardening headers: " + ", ".join(missing) + ".")
+            if hints:
+                parts.append("Technology hints (from response headers): " + "; ".join(hints) + ".")
+            observations.append({"source": "http_headers", "observation": " ".join(parts), "evidence_ref": run})
+        elif tool == "tls_cert":
+            days = data.get("days_until_expiry")
+            if data.get("error") or run.get("error"):
+                observations.append({
+                    "source": "tls_cert",
+                    "observation": f"TLS handshake with {target} failed ({run.get('error') or data.get('error')}).",
+                    "evidence_ref": run,
+                })
+            else:
+                text = (
+                    f"TLS certificate on {target}: subject CN={data.get('subject_cn')!r}, "
+                    f"issuer CN={data.get('issuer_cn')!r}, valid until {data.get('not_after')}"
+                )
+                if days is not None:
+                    text += f" ({days} days remaining)"
+                text += "."
+                observations.append({"source": "tls_cert", "observation": text, "evidence_ref": run})
+        elif tool == "http_redirects":
+            hops = data.get("hops") or []
+            if hops:
+                chain = " -> ".join(_describe_hop(h) for h in hops)
+                text = f"Redirect chain from {target}: {chain}."
+                if data.get("blocked"):
+                    text += f" {data['blocked']}"
+                observations.append({"source": "http_redirects", "observation": text, "evidence_ref": run})
+        elif tool == "summarize_evidence":
+            observations.append({
+                "source": "summarize_evidence",
+                "observation": "Session evidence was summarized (passive, no new traffic).",
+                "evidence_ref": run,
+            })
+    return observations
+
+
+def build_report_context(session: Session) -> dict:
+    observations = extract_confirmed_observations(session)
+    findings = sorted(
+        session.findings,
+        key=lambda f: SEVERITY_ORDER.get(str(f.get("severity", "informational")).lower(), 9),
+    )
+    tools_executed = sorted({r.get("tool", "?") for r in session.tool_runs})
+    approvals = session.approvals
+    declined = [a for a in approvals if a.get("decision") == "declined"]
+    approved = [a for a in approvals if a.get("decision") == "approved"]
+    not_performed = []
+    if not session.tool_runs:
+        not_performed.append("No tools were executed in this session; conclusions rest on no scan evidence.")
+    for name in ("nmap_basic", "http_headers", "tls_cert", "http_redirects"):
+        if name not in tools_executed:
+            not_performed.append(f"{name} was not executed.")
+    return {
+        "observations": observations,
+        "findings": findings,
+        "tools_executed": tools_executed,
+        "approvals": approvals,
+        "approved": approved,
+        "declined": declined,
+        "not_performed": not_performed,
+    }
+
+
+def render_markdown(session: Session, ctx: dict) -> str:
+    lines: list[str] = []
+    add = lines.append
+    add("# Gryphos Assessment Report")
+    add("")
+    add(f"- **Session ID:** `{session.session_id}`")
+    add(f"- **Created:** {session.created_at}")
+    add(f"- **Completed:** {session.completed_at or '(in progress)'}")
+    add(f"- **Model:** `{session.model}`")
+    add(f"- **Objective:** {session.objective}")
+    add(f"- **Target:** `{session.target or '(none)'}`")
+    add("")
+
+    add("## 1. Executive summary")
+    add("")
+    if session.final_assessment:
+        add(session.final_assessment)
+        add("")
+    else:
+        add("_No final assessment was recorded for this session._")
+        add("")
+    if ctx["findings"]:
+        worst = ctx["findings"][0]
+        add(
+            f"Model-recorded findings: {len(ctx['findings'])} "
+            f"(highest severity: {worst.get('severity', 'informational')}). "
+            "Findings are model interpretations of the evidence below and require "
+            "operator verification."
+        )
+    else:
+        add("No structured findings were recorded.")
+    add("")
+
+    add("## 2. Assessment metadata")
+    add("")
+    add(f"- Tools executed: {', '.join(ctx['tools_executed']) if ctx['tools_executed'] else '(none)'}")
+    add(f"- Tool executions recorded: {len(session.tool_runs)}")
+    add(f"- Agent errors recorded: {len(session.errors)}")
+    add("")
+
+    add("## 3. Authorized scope")
+    add("")
+    for item in session.scope_snapshot:
+        add(f"- `{item}`")
+    if not session.scope_snapshot:
+        add("- (no scope snapshot recorded)")
+    add("")
+    add("All executed actions were validated against this scope in application code "
+        "immediately before execution. The model cannot modify scope.")
+    add("")
+
+    add("## 4. Objective and methodology")
+    add("")
+    add(f"**Objective:** {session.objective}")
+    add("")
+    add("Gryphos proposes registered tools; every network-active action requires "
+        "explicit operator approval. Arguments are validated against fixed schemas; "
+        "no shell commands are ever constructed from model output.")
+    add("")
+
+    add("## 5. Tools executed")
+    add("")
+    if session.tool_runs:
+        for index, run in enumerate(session.tool_runs, 1):
+            add(f"### 5.{index} `{run.get('tool', '?')}` on `{run.get('target', '?')}`")
+            add("")
+            add(f"- Exact action: `{run.get('command', '')}`")
+            add(f"- Return code: `{run.get('returncode')}`")
+            if run.get("started_at"):
+                add(f"- Started: {run['started_at']}")
+            if run.get("duration_seconds") is not None:
+                add(f"- Duration: {run['duration_seconds']}s")
+            add("")
+            add(_fence(str(run.get("output", "(no output)"))))
+            add("")
+    else:
+        add("_No tools were executed._")
+        add("")
+
+    add("## 6. Approval decisions")
+    add("")
+    if session.approvals:
+        for decision in session.approvals:
+            mark = {"approved": "APPROVED", "declined": "DECLINED", "cancelled": "CANCELLED"}.get(
+                str(decision.get("decision")), str(decision.get("decision", "?")).upper()
+            )
+            add(f"- [{mark}] `{decision.get('tool', '?')}` on `{decision.get('target', '?')}` "
+                f"at {decision.get('requested_at', '?')} (fingerprint `{str(decision.get('fingerprint', ''))[:12]}…`)")
+    else:
+        add("_No approval requests were made._")
+    add("")
+
+    add("## 7. Confirmed observations")
+    add("")
+    if ctx["observations"]:
+        for index, obs in enumerate(ctx["observations"], 1):
+            add(f"{index}. **[{obs['source']}]** {obs['observation']}")
+    else:
+        add("_No confirmed observations; no tool evidence was recorded._")
+    add("")
+
+    add("## 8. Findings (model interpretations)")
+    add("")
+    add("_The following findings were produced by the AI model. They are "
+        "interpretations of the evidence, not confirmed vulnerabilities, unless "
+        "an observation above explicitly proves the condition._")
+    add("")
+    if ctx["findings"]:
+        for f in ctx["findings"]:
+            add(f"### {f.get('title', '(untitled)')}")
+            add("")
+            add(f"- Severity: **{f.get('severity', 'informational')}**")
+            add(f"- Confidence: **{f.get('confidence', 'medium')}**")
+            add("")
+            if f.get("detail"):
+                add(str(f["detail"]))
+                add("")
+    else:
+        add("_No findings recorded._")
+        add("")
+
+    add("## 9. Recommended remediation")
+    add("")
+    remedi = [f for f in ctx["findings"] if f.get("remediation")]
+    if remedi:
+        for f in remedi:
+            add(f"- **{f.get('title', 'Finding')}:** {f['remediation']}")
+    else:
+        add("_No model-supplied remediation guidance was recorded. Follow your "
+            "organization's hardening baselines for any exposed services._")
+    add("")
+
+    add("## 10. Limitations and untested areas")
+    add("")
+    for item in ctx["not_performed"]:
+        add(f"- {item}")
+    add("- Only approved, registered checks were performed; this is not a full "
+        "vulnerability assessment.")
+    add("- Service versions reported by scanners can be inaccurate; verify manually.")
+    add("- No exploitation, credential testing, evasion, or persistence was attempted.")
+    add("")
+
+    add("## 11. Errors and incomplete checks")
+    add("")
+    if session.errors:
+        for err in session.errors:
+            add(f"- [{err.get('source', '?')}] {err.get('message', '')}")
+    else:
+        add("_No errors recorded._")
+    add("")
+
+    add("## 12. Record")
+    add("")
+    add(f"- Generated: {datetime.now(UTC).isoformat()}")
+    add(f"- Session ID: `{session.session_id}`")
+    add(f"- JSON evidence: `{session.report_json or '(pending)'}`")
+    add("")
+    add("> Review and sanitize this report before sharing; scan output may contain "
+        "sensitive host information. AI-generated interpretations are hypotheses, "
+        "not proof.")
+    add("")
+    return "\n".join(lines)
+
+
+def generate_reports(session: Session, directory: Path) -> tuple[Path, Path]:
+    """Write `<session_id>.json` evidence and `<session_id>.md` report."""
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    ctx = build_report_context(session)
+    json_path = directory / f"{session.session_id}.json"
+    md_path = directory / f"{session.session_id}.md"
+
+    payload = session.to_dict()
+    payload["report_context"] = {
+        "confirmed_observations": [
+            {"source": o["source"], "observation": o["observation"]} for o in ctx["observations"]
+        ],
+        "tools_executed": ctx["tools_executed"],
+        "not_performed": ctx["not_performed"],
+    }
+    session.report_json = str(json_path)
+    session.report_markdown = str(md_path)
+    payload["report_json"] = str(json_path)
+    payload["report_markdown"] = str(md_path)
+
+    _atomic_write(json_path, json.dumps(payload, indent=2, default=str))
+    _atomic_write(md_path, render_markdown(session, ctx))
+    return json_path, md_path
