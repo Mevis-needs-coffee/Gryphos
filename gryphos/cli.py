@@ -20,7 +20,7 @@ from .config import ConfigError, Settings, get_settings
 from .llm import GryphosLLM, LLMError
 from .logging_setup import setup_logging
 from .reporting import generate_reports
-from .scope import ScopeError, validate_target
+from .scope import EXPAND_SCOPE_CONFIRMATION, ScopeError, ScopeManager, validate_target
 from .session import Session, SessionStore, new_session_id
 from .tools import build_registry
 
@@ -44,9 +44,14 @@ class AppState:
     registry: dict
     store: SessionStore
     console: Console
+    scope: ScopeManager | None = None
     history: list[dict] = field(default_factory=list)  # REPL transcript
     last_session: Session | None = None
     last_target: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.scope is None:
+            self.scope = ScopeManager(baseline=tuple(self.settings.allowed_targets))
 
 
 def _fmt_models(models, console: Console, limit: int = 60) -> None:
@@ -101,7 +106,7 @@ def handle_line(state: AppState, line: str) -> bool:
         elif command == "model":
             _cmd_model(state, argument)
         elif command == "scope":
-            _cmd_scope(state)
+            _cmd_scope(state, argument)
         elif command == "assess":
             _cmd_assess(state, argument)
         elif command == "clear":
@@ -154,7 +159,7 @@ def _cmd_help(state: AppState) -> None:
         "  help              Show this help\n"
         "  models            List OpenRouter models (ID + display name)\n"
         "  model <exact-id>  Select a model by exact OpenRouter ID\n"
-        "  scope             Show the authorized target scope\n"
+        "  scope             Show the authorized scope (see also: scope set|narrow|reset)\n"
         "  assess [text]     Run an assessment (optionally with an objective)\n"
         "  status            Current model, scope, and session info\n"
         "  sessions          List saved sessions\n"
@@ -194,12 +199,93 @@ def _cmd_model(state: AppState, argument: str) -> None:
     state.console.print(f"[{style}]{message}[/{style}]")
 
 
-def _cmd_scope(state: AppState) -> None:
-    state.console.print(f"Authorized scope: [cyan]{', '.join(state.settings.allowed_targets)}[/cyan]")
+def _show_scope(state: AppState) -> None:
+    scope = state.scope
+    baseline = ", ".join(scope.baseline)
+    state.console.print(f"Authorized scope (baseline): [cyan]{baseline}[/cyan]")
+    if tuple(scope.effective) != tuple(scope.baseline):
+        state.console.print(
+            f"Effective scope (narrowed): [cyan]{', '.join(scope.effective)}[/cyan]"
+        )
     state.console.print(
-        "[dim]Only literal IPs inside this scope can be assessed. "
-        "Change it in .env (GRYPHOS_ALLOWED_TARGETS) and restart; the model cannot modify it.[/dim]"
+        "[dim]Only literal IPs inside this scope can be assessed. Narrowing is free; "
+        "widening beyond the baseline requires the explicit confirmation token. "
+        "The model can never change scope.[/dim]\n"
+        "[dim]Usage: scope | scope narrow <ip[,ip...]> | scope set <ip[,ip...]> | scope reset[/dim]"
     )
+    if scope.changes:
+        last = scope.changes[-1]
+        state.console.print(
+            f"[dim]Last change: {last['kind']} ({last['authorization']}) at {last['at']}[/dim]"
+        )
+
+
+def _cmd_scope(state: AppState, argument: str) -> None:
+    tokens = argument.split(maxsplit=1)
+    sub = tokens[0].lower() if tokens else ""
+    rest = tokens[1].strip() if len(tokens) > 1 else ""
+
+    if not sub:
+        _show_scope(state)
+        return
+
+    if sub == "reset":
+        record = state.scope.reset()
+        state.console.print(
+            f"[green]Scope reset to baseline:[/green] {', '.join(state.scope.effective)}"
+        )
+        state.console.print(f"[dim]Change recorded: {record['kind']} ({record['authorization']}).[/dim]")
+        return
+
+    if sub not in {"set", "add", "narrow"}:
+        state.console.print(
+            "[yellow]Usage: scope | scope narrow <ip[,ip...]> | scope set <ip[,ip...]> | scope reset[/yellow]"
+        )
+        return
+
+    if not rest:
+        state.console.print("[yellow]Provide one or more IPs/CIDRs, comma-separated.[/yellow]")
+        return
+
+    candidate = tuple(part.strip() for part in rest.split(",") if part.strip())
+    try:
+        kind = state.scope.classify(candidate)
+    except ScopeError as exc:
+        state.console.print(f"[red]Invalid scope:[/red] {exc}")
+        return
+
+    confirmation = ""
+    if kind == "expand":
+        state.console.print(Panel(
+            "[bold red]This expands the authorized scope beyond the configured baseline.[/bold red]\n\n"
+            f"[bold]Baseline:[/bold] {', '.join(state.scope.baseline)}\n"
+            f"[bold]Proposed:[/bold] {', '.join(candidate)}\n\n"
+            "Expanding scope authorizes new destinations. This is your explicit, "
+            "out-of-band decision — the model cannot do this. Leave blank to abort.",
+            title="Confirm scope expansion",
+            border_style="red",
+        ))
+        try:
+            typed = state.console.input(
+                f"Type [bold]{EXPAND_SCOPE_CONFIRMATION}[/bold] to confirm: "
+            ).strip()
+        except (KeyboardInterrupt, EOFError):
+            state.console.print("[yellow]Scope expansion aborted.[/yellow]")
+            return
+        if typed != EXPAND_SCOPE_CONFIRMATION:
+            state.console.print("[yellow]Scope expansion aborted (confirmation not given).[/yellow]")
+            return
+        confirmation = typed
+
+    try:
+        record = state.scope.change(candidate, confirmation=confirmation)
+    except ScopeError as exc:
+        state.console.print(f"[red]Scope change rejected:[/red] {exc}")
+        return
+    state.console.print(
+        f"[green]Scope {record['kind']}:[/green] {', '.join(state.scope.effective)}"
+    )
+    state.console.print(f"[dim]Authorization: {record['authorization']}.[/dim]")
 
 
 def _cmd_status(state: AppState) -> None:
@@ -208,10 +294,13 @@ def _cmd_status(state: AppState) -> None:
     table.add_column("Key", style="cyan")
     table.add_column("Value")
     table.add_row("Model", state.llm.model)
-    table.add_row("Scope", ", ".join(state.settings.allowed_targets))
+    table.add_row("Scope", ", ".join(state.scope.baseline))
+    if tuple(state.scope.effective) != tuple(state.scope.baseline):
+        table.add_row("Effective scope", ", ".join(state.scope.effective))
     table.add_row("Last target", state.last_target or "(none)")
     table.add_row("Step limit", str(state.settings.max_agent_steps))
     table.add_row("Time budget", f"{state.settings.time_budget_seconds}s")
+    table.add_row("Max approval level", f"L{state.settings.max_approval_level}")
     table.add_row("Tools", ", ".join(sorted(state.registry)))
     table.add_row("Last session", last.session_id if last else "(none)")
     table.add_row("Saved sessions", str(len(state.store.list_sessions())))
@@ -281,6 +370,7 @@ def _cmd_config(state: AppState) -> None:
 def _cmd_tools(state: AppState) -> None:
     table = Table(title="Registered tools")
     table.add_column("Tool", style="cyan")
+    table.add_column("Level", justify="center")
     table.add_column("Network", justify="center")
     table.add_column("Risk")
     table.add_column("Approval")
@@ -288,6 +378,7 @@ def _cmd_tools(state: AppState) -> None:
     for spec in state.registry.values():
         table.add_row(
             spec.name,
+            f"L{spec.approval_level}",
             "yes" if spec.network_active else "no",
             spec.risk,
             spec.approval_policy,
@@ -295,7 +386,8 @@ def _cmd_tools(state: AppState) -> None:
         )
     state.console.print(table)
     state.console.print(
-        "[dim]Only these tools can ever execute. The model cannot invent commands or tools.[/dim]"
+        "[dim]Only these tools can ever execute. Levels 2+ require your explicit approval; "
+        "Level 4 is disabled by default. The model cannot invent commands or tools.[/dim]"
     )
 
 
@@ -330,9 +422,10 @@ def _run_assessment(state: AppState, objective: str, target: str | None, interac
             "OPENROUTER_API_KEY is not configured. Copy .env.example to .env and set your key."
         )
 
+    effective_scope = tuple(state.scope.effective)
     if target:
         try:
-            target = validate_target(target, settings.allowed_targets)
+            target = validate_target(target, effective_scope)
             state.last_target = target
         except ScopeError as exc:
             state.console.print(f"[red]Target rejected:[/red] {exc}")
@@ -341,12 +434,13 @@ def _run_assessment(state: AppState, objective: str, target: str | None, interac
     session = Session(
         session_id=new_session_id(),
         objective=objective,
-        scope_snapshot=settings.allowed_targets,
+        scope_snapshot=effective_scope,
         model=state.llm.model,
     )
     outcome = run_agent(
         state.llm, settings, objective, target,
         registry=state.registry, session=session, console=state.console,
+        scope_items=effective_scope,
     )
     session.record_history("assistant", outcome.final_message or f"(status: {outcome.status})")
     session.complete()
@@ -397,7 +491,8 @@ def run_repl(settings: Settings | None = None, console: Console | None = None) -
     console.print(Panel(BANNER, border_style="green"))
     console.print(
         f"Model: [cyan]{llm.model}[/cyan]   "
-        f"Scope: [cyan]{', '.join(settings.allowed_targets)}[/cyan]"
+        f"Scope: [cyan]{', '.join(state.scope.baseline)}[/cyan]   "
+        f"Max approval level: [cyan]L{settings.max_approval_level}[/cyan]"
     )
 
     while True:

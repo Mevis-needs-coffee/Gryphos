@@ -41,31 +41,62 @@ arbitrary shell commands and will not scan anything outside your scope.
 
 ## Registered tools
 
-Gryphos exposes a fixed, modular registry of 11 tools. Active network tools
-require explicit approval and enforce scope in code; passive local tools are
-read-only and make no network calls.
+Gryphos exposes a fixed, modular registry of 12 tools, gated by a risk-based
+approval policy. Every tool declares an **approval level (0-4)**; levels 2 and
+above always require explicit operator approval, and the prompt shows the exact
+action and its expected impact before asking (default: no). Level 4 is disabled
+by default.
 
-| Tool | Activity | Network | Risk | Approval | Purpose |
-|---|---|---|---|---|---|
-| `nmap_basic` | active | yes | low | explicit | Top-100 TCP connect scan with service detection (`-n -Pn -sT -sV --top-ports 100 -T2 --reason`). |
-| `http_headers` | active | yes | low | explicit | One HTTP HEAD request; reports security headers, tech hints, missing hardening. |
-| `http_redirects` | active | yes | low | explicit | Traces up to 5 redirect hops; every hop must be an in-scope literal IP. |
-| `tls_cert` | active | yes | low | explicit | TLS handshake; certificate subject/issuer/validity/SANs; verification never disabled. |
-| `web_tech` | active | yes | low | explicit | Bounded header + ≤8 KiB body fingerprint; no crawling; results labelled inferred. |
-| `local_ports` | passive | no | informational | none | `ss -ltunp`; classifies listeners local-only / interface-bound / wildcard-exposed. |
-| `local_audit` | passive | no | informational | none | One read-only snapshot: `services`, `firewall`, `journal`, `lynis`. Never elevates privileges. |
-| `source_scan` | passive | no | low | none | Bandit (and optional offline Semgrep with a local rules dir); findings are file:line only. |
-| `dependency_audit` | passive | no | informational | none | `pip-audit` on a manifest/lockfile; distinguishes clean from data-unavailable; never upgrades. |
-| `secret_detect` | passive | no | low | none | gitleaks `--redact`; only rule + file:line are reported; values are never retained. |
-| `summarize_evidence` | passive | no | informational | none | Offline summary, correlation, and contradiction detection over recorded evidence. |
+| Level | Meaning |
+|---|---|
+| 0 | Internal evidence parsing and explanation (offline). |
+| 1 | Restricted, read-only local inspection. |
+| 2 | Network-active checks (Nmap, HTTP, TLS). |
+| 3 | More intrusive authorized assessment, with tighter constraints. |
+| 4 | System modifications / privileged actions — **disabled by default**. |
+
+Active network tools require explicit approval and enforce scope in code;
+passive local tools are read-only and make no network calls.
+
+| Tool | Level | Activity | Network | Risk | Approval | Purpose |
+|---|---|---|---|---|---|---|
+| `nmap_basic` | 2 | active | yes | low | explicit | Top-100 TCP connect scan with service detection (`-n -Pn -sT -sV --top-ports 100 -T2 --reason`). |
+| `http_headers` | 2 | active | yes | low | explicit | One HTTP HEAD request; reports security headers, tech hints, missing hardening. |
+| `http_redirects` | 2 | active | yes | low | explicit | Traces up to 5 redirect hops; every hop must be an in-scope literal IP. |
+| `tls_cert` | 2 | active | yes | low | explicit | TLS handshake; certificate subject/issuer/validity/SANs; verification never disabled; re-validates the connected peer. |
+| `web_tech` | 2 | active | yes | low | explicit | Bounded header + ≤8 KiB body fingerprint; no crawling; results labelled inferred. |
+| `tcp_banner` | 3 | active | yes | medium | explicit | One TCP connect; reads an unprompted banner (no payload sent); re-validates the connected peer. |
+| `local_ports` | 1 | passive | no | informational | none | `ss -ltunp`; classifies listeners local-only / interface-bound / wildcard-exposed. |
+| `local_audit` | 1 | passive | no | informational | none | One read-only snapshot: `services`, `firewall`, `journal`, `lynis`. Never elevates privileges. |
+| `source_scan` | 1 | passive | no | low | none | Bandit (and optional offline Semgrep with a local rules dir); findings are file:line only. |
+| `dependency_audit` | 1 | passive | no | informational | none | `pip-audit` on a manifest/lockfile; distinguishes clean from data-unavailable; never upgrades. |
+| `secret_detect` | 1 | passive | no | low | none | gitleaks `--redact`; only rule + file:line are reported; values are never retained. |
+| `summarize_evidence` | 0 | passive | no | informational | none | Offline summary, correlation, and contradiction detection over recorded evidence. |
 
 Each tool declares its name, purpose, input schema, scope requirements, risk,
-passive/active classification, network activity, timeout, output limit,
-approval policy, structured result format, and an exact-action display.
+approval level, passive/active classification, network activity, timeout, output
+limit, approval policy, structured result format, and an exact-action display.
 Arguments are validated against fixed schemas; unknown flags/arguments are
 rejected and the model can never name an executable or construct a command.
 URL-based tools accept **literal in-scope IPs only** (no hostnames), and
 redirects to out-of-scope or hostname destinations are blocked.
+
+## Scope and approval
+
+- **Scope is a hard boundary.** Targets must be literal IPv4/IPv6 addresses
+  inside `GRYPHOS_ALLOWED_TARGETS`. Hostnames, URLs, CIDR ranges, and ambiguous
+  forms are rejected where a single literal IP is required. Scope is re-checked
+  in code immediately before every tool runs and on every redirect hop.
+- **Scope changes are guarded.** Narrowing the effective scope is allowed; any
+  expansion beyond the configured baseline requires an explicit operator
+  confirmation token (`EXPAND-SCOPE`). The model can never change scope. Use
+  `scope`, `scope narrow <ip,...>`, `scope set <ip,...>`, and `scope reset`.
+- **DNS rebinding is structurally avoided.** URL/target hosts must be literal
+  IPs (no DNS resolution). Where a host is resolved, *every* resolved address
+  must be in scope, and the address actually connected to is re-validated after
+  the connection.
+- **Approval is never implied.** It is fingerprint-bound, single-use, and
+  defaults to deny; a model response can never manufacture authorization.
 
 ## Architecture
 
@@ -187,7 +218,10 @@ python main.py start
 | `help` | Show command help. |
 | `models` | List OpenRouter models (ID + display name + context + free flag). |
 | `model <exact-id>` | Select a model by exact OpenRouter ID. |
-| `scope` | Show the authorized target scope. |
+| `scope` | Show the authorized scope + effective scope and change history. |
+| `scope narrow <ip[,ip...]>` | Narrow the effective scope to a subset (applied immediately). |
+| `scope set <ip[,ip...]>` | Change scope; expansion beyond the baseline needs the `EXPAND-SCOPE` token. |
+| `scope reset` | Restore the effective scope to the configured baseline. |
 | `assess [text]` | Run an assessment, optionally with an objective. |
 | `status` | Show current model, scope, tools, and session info. |
 | `sessions` | List saved sessions. |
@@ -281,7 +315,9 @@ ruff check gryphos/ main.py tests/
 - URL tools accept literal in-scope IPs only (hostname-based vhosts are not supported).
 - `nmap_basic` scans only the top 100 TCP ports; carve this out in reports.
 - `web_tech` fingerprints are **inferred** from headers and a small body sample and can be spoofed; treat them as hints.
+- `tcp_banner` (Level 3) reads only an unprompted banner; services that require a request send nothing.
 - Passive local tools (`local_ports`, `local_audit`) inspect only the host Gryphos runs on; `source_scan`, `dependency_audit`, and `secret_detect` need their external tools (Bandit/Semgrep, pip-audit, gitleaks) installed locally.
+- No Level 4 tools ship; the policy and registry gating reserve that level for system modifications, disabled by default.
 - Model findings are interpretations, not proof; verify manually.
 - Free-tier models may be unavailable, rate-limited, or unable to follow the
   required JSON format; select a different model when prompted.
@@ -290,10 +326,16 @@ ruff check gryphos/ main.py tests/
 
 ## Security design and responsible use
 
-- Scope is enforced in application code immediately before execution; the model
-  cannot modify scope.
-- Approval is fingerprint-bound, single-use, and defaults to deny; it cannot be
+- Scope is enforced in application code immediately before execution and on
+  every redirect hop; the model cannot modify scope. Scope expansion beyond the
+  configured baseline requires an explicit operator confirmation token.
+- Approval follows a risk-based level policy (0-4): levels 2+ always require
+  explicit approval; the prompt shows the exact action and expected impact and
+  defaults to "no". Approval is fingerprint-bound, single-use, and cannot be
   manufactured or reused by model output.
+- Destination hosts must be literal in-scope IPs (no DNS); where a host is
+  resolved, every address must be in scope and the connected peer is
+  re-validated.
 - No `shell=True`; all external tools use fixed argument lists with timeouts and
   output limits.
 - Secrets are redacted from logs; API keys are never printed or written to reports.

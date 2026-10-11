@@ -15,7 +15,12 @@ import ssl
 
 import requests
 
-from ..scope import ScopeError, authorize_url, validate_target
+from ..scope import (
+    ScopeError,
+    authorize_url,
+    resolve_and_validate,
+    validate_connected_peer,
+)
 
 USER_AGENT = "Gryphos/1.0 (authorized security assessment; +local)"
 
@@ -26,8 +31,12 @@ def authorized_destination(
     port: int,
     scope_items: tuple[str, ...],
 ) -> tuple[str, int]:
-    """Validate (host, port) against scope; returns the normalized pair."""
-    host = validate_target(str(host), scope_items)
+    """Validate (host, port) against scope; returns the normalized pair.
+
+    Uses `resolve_and_validate` so a literal IP is validated directly and (were
+    hostnames ever enabled) every resolved address would be checked too.
+    """
+    host = resolve_and_validate(str(host), scope_items)
     port = int(port)
     if not (1 <= port <= 65535):
         raise ScopeError("Port must be between 1 and 65535.")
@@ -81,14 +90,28 @@ def tls_context() -> ssl.SSLContext:
 
 def tls_connect(
     host: str, port: int, connect_name: str, timeout: int,
+    scope_items: tuple[str, ...] | None = None,
 ) -> tuple[ssl.SSLSocket, dict]:
     """Open and wrap a TLS socket with full verification.
 
-    Returns (socket, parsed_peer_cert). Raises ssl.CertificateError on
-    hostname/chain failures and OSError on connection failures.
+    The actual connected peer address is re-validated against scope before the
+    handshake proceeds, so the real destination (not just the requested one)
+    must be authorized. Returns (socket, parsed_peer_cert). Raises
+    ssl.CertificateError on hostname/chain failures and OSError on connection
+    failures.
     """
     context = tls_context()
     sock = socket.create_connection((host, port), timeout=timeout)
+    if scope_items is not None:
+        try:
+            peer = str(sock.getpeername()[0])
+        except OSError:
+            peer = str(host)
+        try:
+            validate_connected_peer(peer, scope_items)
+        except ScopeError:
+            sock.close()
+            raise
     try:
         tls = context.wrap_socket(sock, server_hostname=connect_name)
     except (OSError, ValueError):

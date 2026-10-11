@@ -16,6 +16,12 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
+from ..approval import (
+    APPROVAL_REQUIRED_FROM_LEVEL,
+    requires_approval,
+    validate_level,
+)
+
 RISK_LEVELS = ("informational", "low", "medium", "high", "critical")
 APPROVAL_POLICIES = ("explicit", "none")
 ACTIVITIES = ("passive", "active")
@@ -140,6 +146,7 @@ class ToolSpec:
     max_output_chars: int
     execute: Callable[..., ToolResult]
     activity: str = "active"  # "passive" (local, read-only, no network) or "active"
+    approval_level: int = APPROVAL_REQUIRED_FROM_LEVEL  # risk-based policy, 0-4
     scope_requirements: str = ""
     result_schema: dict = field(default_factory=dict)
     show: Callable[[dict], str] | None = None  # render exact action for approval/display
@@ -151,6 +158,35 @@ class ToolSpec:
             raise ValueError(f"Unknown approval policy {self.approval_policy!r}")
         if self.activity not in ACTIVITIES:
             raise ValueError(f"Unknown activity classification {self.activity!r}")
+        validate_level(self.approval_level)
+        # Keep the coarse policy, activity, and network flag consistent with the
+        # fine-grained risk level so a tool can never under-declare its risk.
+        if self.approval_level >= APPROVAL_REQUIRED_FROM_LEVEL:
+            if self.approval_policy != "explicit":
+                raise ValueError(
+                    f"Tool {self.name!r} is level {self.approval_level} and must use "
+                    "approval_policy='explicit'."
+                )
+            if self.activity != "active":
+                raise ValueError(
+                    f"Tool {self.name!r} is level {self.approval_level} and must be active."
+                )
+        else:
+            if self.approval_policy != "none":
+                raise ValueError(
+                    f"Tool {self.name!r} is level {self.approval_level} and must use "
+                    "approval_policy='none'."
+                )
+            if self.network_active:
+                raise ValueError(
+                    f"Tool {self.name!r} is level {self.approval_level} and cannot be "
+                    "network-active."
+                )
+
+    @property
+    def requires_approval(self) -> bool:
+        """True when this tool mandates explicit operator approval (levels 2-4)."""
+        return requires_approval(self.approval_level)
 
     def describe(self) -> dict:
         return {
@@ -163,6 +199,7 @@ class ToolSpec:
             "network_active": self.network_active,
             "activity": self.activity,
             "approval_policy": self.approval_policy,
+            "approval_level": self.approval_level,
             "scope_requirements": self.scope_requirements,
             "result_schema": self.result_schema,
             "timeout": self.timeout,

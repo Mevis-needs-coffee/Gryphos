@@ -268,6 +268,7 @@ def summarize_evidence_spec(timeout: int, out_limit: int) -> ToolSpec:
         timeout=min(timeout, 15),
         max_output_chars=out_limit,
         activity="passive",
+        approval_level=0,
         scope_requirements="None: operates on already-collected evidence only.",
         result_schema={"type": "object", "properties": {
             "facts": {"type": "array"},

@@ -110,6 +110,7 @@ def local_ports_spec(timeout: int, out_limit: int) -> ToolSpec:
         timeout=min(timeout, 15),
         max_output_chars=out_limit,
         activity="passive",
+        approval_level=1,
         scope_requirements="No network targets; inspects the local host only.",
         result_schema={"type": "object", "properties": {
             "listeners": {"type": "array"},

@@ -31,7 +31,7 @@ PASSIVE_TOOLS = {
     "local_ports", "local_audit", "source_scan",
     "dependency_audit", "secret_detect", "summarize_evidence",
 }
-ACTIVE_TOOLS = {"nmap_basic", "http_headers", "http_redirects", "tls_cert", "web_tech"}
+ACTIVE_TOOLS = {"nmap_basic", "http_headers", "http_redirects", "tls_cert", "web_tech", "tcp_banner"}
 
 
 class FakeResponse:

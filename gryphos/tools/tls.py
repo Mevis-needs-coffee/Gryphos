@@ -40,7 +40,7 @@ def _run_tls_cert(
     started = datetime.now(UTC)
 
     try:
-        tls, cert = tls_connect(safe_target, safe_port, connect_name, timeout)
+        tls, cert = tls_connect(safe_target, safe_port, connect_name, timeout, scope_items)
     except ssl.CertificateError as exc:
         return _failure(
             safe_target, display, started,
@@ -176,6 +176,7 @@ def tls_cert_spec(timeout: int, out_limit: int) -> ToolSpec:
         timeout=min(timeout, 30),
         max_output_chars=out_limit,
         activity="active",
+        approval_level=2,
         scope_requirements="Literal in-scope IP only; certificate verification is never disabled.",
         result_schema={"type": "object", "properties": {
             "subject_cn": {"type": "string"},

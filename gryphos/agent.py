@@ -19,7 +19,13 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
 
-from .approval import ApprovalManager, ApprovalRequest
+from .approval import (
+    ApprovalManager,
+    ApprovalRequest,
+    level_impact,
+    level_name,
+    level_purpose,
+)
 from .llm import LLMError, build_system_prompt
 from .models import (
     ClarificationDecision,
@@ -55,6 +61,7 @@ class Agent:
         console: Console | None = None,
         approve: Callable[[ApprovalRequest], bool] | None = None,
         ask_user: Callable[[str], str] | None = None,
+        scope_items: tuple[str, ...] | None = None,
     ):
         self.llm = llm
         self.settings = settings
@@ -65,6 +72,12 @@ class Agent:
         self.system_prompt = build_system_prompt(registry)
         self._approve = approve or self._default_approve
         self._ask_user = ask_user or self._default_ask
+        # Effective scope: defaults to the configured baseline, but the CLI may
+        # pass a deliberately narrowed scope. The model never controls this.
+        self.scope_items = (
+            tuple(scope_items) if scope_items is not None else tuple(settings.allowed_targets)
+        )
+        self.max_approval_level = int(getattr(settings, "max_approval_level", 3))
         self.evidence: list[dict] = []
         self._fingerprints_seen: set[str] = set()
         self._failure_streak = 0
@@ -83,8 +96,11 @@ class Agent:
             f"[bold]Purpose:[/bold] {request.purpose}\n"
             f"[bold]Reason from model:[/bold] {request.reason or '(none given)'}\n\n"
             f"[bold]Exact action:[/bold]\n{request.display}\n\n"
-            f"[bold]Risk:[/bold] {request.risk}\n"
+            f"[bold]Approval level:[/bold] {level_name(request.approval_level)}\n"
+            f"[bold]Why this level:[/bold] {level_purpose(request.approval_level)}\n"
+            f"[bold]Expected impact:[/bold] {level_impact(request.approval_level)}\n"
             f"[bold]Side effects:[/bold] {request.side_effects}\n"
+            f"[bold]Risk:[/bold] {request.risk}   "
             f"[bold]Timeout:[/bold] {request.timeout}s   "
             f"[bold]Output limit:[/bold] {request.output_limit} chars\n\n"
             f"{traffic}",
@@ -100,7 +116,7 @@ class Agent:
 
     def run(self, objective: str, target: str | None) -> AgentOutcome:
         try:
-            safe_target = validate_target(target, self.settings.allowed_targets) if target else None
+            safe_target = validate_target(target, self.scope_items) if target else None
         except ScopeError as exc:
             self.console.print(f"[red]Target rejected:[/red] {exc}")
             self.session.record_error("scope", str(exc))
@@ -209,6 +225,19 @@ class Agent:
             self._note_failure()
             return None
 
+        # Defense in depth: never run a tool above the configured level ceiling,
+        # even if it somehow reached the registry.
+        if spec.approval_level > self.max_approval_level:
+            msg = (
+                f"Rejected tool {tool_name!r}: approval level {spec.approval_level} "
+                f"exceeds the configured maximum ({self.max_approval_level})."
+            )
+            self.console.print(f"[red]{msg}[/red]")
+            self.evidence.append({"kind": "rejected", "tool": tool_name, "reason": msg})
+            self.session.record_error("agent", msg)
+            self._note_failure()
+            return None
+
         try:
             args = validate_args(spec, decision.args)
         except ToolError as exc:
@@ -220,7 +249,7 @@ class Agent:
         # Scope enforcement for tools that act on a single target IP.
         if "target" in spec.input_schema.get("properties", {}):
             try:
-                args["target"] = validate_target(str(args.get("target", "")), self.settings.allowed_targets)
+                args["target"] = validate_target(str(args.get("target", "")), self.scope_items)
             except ScopeError as exc:
                 self.console.print(f"[red]Rejected out-of-scope proposal:[/red] {exc}")
                 self.evidence.append({"kind": "rejected", "tool": tool_name, "reason": str(exc)})
@@ -245,6 +274,7 @@ class Agent:
             output_limit=spec.max_output_chars,
             risk=spec.risk,
             side_effects=spec.side_effects,
+            approval_level=spec.approval_level,
             reason=decision.reason,
         )
 
@@ -255,7 +285,7 @@ class Agent:
             self.evidence.append({"kind": "note", "message": msg})
             return None
 
-        if spec.network_active or spec.approval_policy == "explicit":
+        if spec.requires_approval:
             try:
                 approved = self._approve(request)
             except (KeyboardInterrupt, EOFError):
@@ -277,13 +307,13 @@ class Agent:
                 self.session.record_error("approval", "Approval state invalid; denying execution.")
                 return self._stop("failed", "Approval state was invalid; nothing was executed.")
         else:
-            # Passive tools: still recorded, no network consequence.
+            # Level 0-1 tools: no side effects beyond local reads; recorded only.
             self.session.approvals.append({**request.to_record(), "decision": "auto-passive"})
 
         self._fingerprints_seen.add(request.fingerprint)
 
         try:
-            result = spec.execute(args, self.settings.allowed_targets, self.evidence)
+            result = spec.execute(args, self.scope_items, self.evidence)
         except (ToolError, ScopeError) as exc:
             self.console.print(f"[red]Tool rejected:[/red] {exc}")
             self.evidence.append({"kind": "tool_error", "tool": tool_name, "error": str(exc)})
@@ -352,10 +382,14 @@ def run_agent(
     console: Console | None = None,
     approve: Callable[[ApprovalRequest], bool] | None = None,
     ask_user: Callable[[str], str] | None = None,
+    scope_items: tuple[str, ...] | None = None,
 ) -> AgentOutcome:
     """Convenience wrapper used by the CLI and tests."""
     from .tools import build_registry
 
+    effective_scope = (
+        tuple(scope_items) if scope_items is not None else tuple(settings.allowed_targets)
+    )
     if registry is None:
         registry = build_registry(settings)
     if session is None:
@@ -363,12 +397,12 @@ def run_agent(
         session = Session(
             session_id=new_session_id(),
             objective=objective,
-            scope_snapshot=settings.allowed_targets,
+            scope_snapshot=effective_scope,
             model=llm.model,
         )
     agent = Agent(
         llm, settings, registry, session,
-        console=console, approve=approve, ask_user=ask_user,
+        console=console, approve=approve, ask_user=ask_user, scope_items=effective_scope,
     )
     session.record_history("user", objective)
     outcome = agent.run(objective, target)

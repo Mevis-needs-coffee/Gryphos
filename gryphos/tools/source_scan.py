@@ -194,6 +194,7 @@ def source_scan_spec(timeout: int, out_limit: int) -> ToolSpec:
         timeout=min(timeout, 120),
         max_output_chars=out_limit,
         activity="passive",
+        approval_level=1,
         scope_requirements="User-selected project root only; vendored/vcs dirs excluded; no source visible outside.",
         result_schema={"type": "object", "properties": {
             "project_dir": {"type": "string"},

@@ -33,6 +33,7 @@ def test_registry_contains_expected_tools(registry):
         "http_redirects",
         "tls_cert",
         "web_tech",
+        "tcp_banner",
         "local_ports",
         "local_audit",
         "source_scan",

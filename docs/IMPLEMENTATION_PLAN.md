@@ -42,6 +42,7 @@ Baseline verification: modules import, `validate_target` accepts `127.0.0.1` and
 - [x] P13 (Phase Four): `gryphos/analysis.py` — Tool 10 offline evidence analysis: `normalize_observations`, `correlate`, `detect_contradictions`, `compare_sessions`, and the passive `summarize_evidence` spec; `reporting.py` surfaces correlation (§7a) and contradictions (§7b) in Markdown and JSON; `scope.py` gains `classify_ip` reserved-address diagnostics; `tools/__init__.py` re-exports the stable legacy API
 - [x] P5b: `approval.py` — approval requests with SHA-256 fingerprints over canonical (tool, args, target), default deny, single use, new approval required when any security-relevant arg changes
 - [x] P5c: `scope.py` — IPv4/IPv6 deliberate handling, normalization, ambiguity rejection, URL authorization helper
+- [x] P14 (Phase Five): approval + scope enforcement — `approval.py` gains a risk-based policy (levels 0-4, `requires_approval`, `level_allowed`, `level_name`/`level_purpose`/`level_impact`, `ApprovalRequest.approval_level`); `ToolSpec.approval_level` with consistency validation and a registry gated by `GRYPHOS_MAX_APPROVAL_LEVEL` (default 3, level 4 disabled); new Level 3 `tcp_banner` (single connect, unprompted banner only, connected peer re-validated); `scope.py` gains `ScopeManager` (baseline/effective + change history, expansion requires the explicit `EXPAND-SCOPE` operator token), `is_subset`, `describe_change`, `resolve_and_validate`, and `validate_connected_peer`; URL/TCP tools re-validate every redirect hop and the connected peer; agent rejects tools above the ceiling and renders level name/purpose/impact in the approval prompt (default no); CLI `scope`/`scope narrow`/`scope set`/`scope reset` with token-guarded expansion and effective-scope wiring
 - [x] P6: `session.py` — session records (id, ISO-8601 tz timestamps, objective, scope snapshot, model, history, proposals, approvals, tool runs, findings, errors, final assessment, report paths), atomic writes, corrupt-file tolerance, old-format loading, listing
 - [x] P7: `reporting.py` — Markdown + JSON reports with executive summary, metadata, scope, methodology, tools, approvals, findings (severity/confidence/evidence), remediation, limitations, errors; confirmed observations separated from model interpretations; untrusted output safely fenced
 - [x] P8: `logging_setup.py` — file logging under `logs/`, secret-redaction filter
@@ -54,7 +55,7 @@ Baseline verification: modules import, `validate_target` accepts `127.0.0.1` and
 Verified via the automated suite (offline) plus targeted live checks where a key
 was available:
 
-- **Automated:** `python -m pytest` → 205 passed; `ruff check gryphos/ main.py tests/` → clean.
+- **Automated:** `python -m pytest` → 245 passed; `ruff check gryphos/ main.py tests/` → clean.
 - **Live OpenRouter (manual, not required by tests):** catalog fetch returned 458
   models with exact IDs and free flags; exact-ID selection succeeded; a concrete
   free model returned valid decision JSON through `_create`; a 429 rate-limit and

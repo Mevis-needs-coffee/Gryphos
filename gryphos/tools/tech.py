@@ -216,6 +216,7 @@ def web_tech_spec(timeout: int, out_limit: int) -> ToolSpec:
         timeout=min(timeout, 30),
         max_output_chars=out_limit,
         activity="active",
+        approval_level=2,
         scope_requirements="Literal in-scope IP only; no crawling and no automatic redirects.",
         result_schema={"type": "object", "properties": {
             "status_code": {"type": "integer"},

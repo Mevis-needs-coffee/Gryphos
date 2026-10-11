@@ -5,12 +5,24 @@ any tool executes. Only literal IPv4/IPv6 addresses are accepted as targets;
 hostnames, URLs, CIDR ranges, and ambiguous forms are rejected. Scope entries
 themselves may be IPs or CIDR networks. IPv4 and IPv6 are never mixed: a
 target is only in scope if a network of the same IP version contains it.
+
+Scope changes are guarded: narrowing the effective scope to a subset of the
+configured baseline is allowed silently, but *expansion* beyond the baseline
+always requires an explicit, out-of-band operator action (a confirmation
+token), so scope can never be widened accidentally or by model output.
 """
 
 from __future__ import annotations
 
 import ipaddress
+import socket
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from urllib.parse import urlsplit
+
+# A scope change beyond the configured baseline only proceeds when the operator
+# supplies this exact token. It is never derived from model output.
+EXPAND_SCOPE_CONFIRMATION = "EXPAND-SCOPE"
 
 
 class ScopeError(ValueError):
@@ -192,3 +204,159 @@ def validate_path(path: object) -> str:
     if len(text) > 2048:
         raise ScopeError("HTTP path is too long.")
     return text
+
+
+# --- resolved-IP / connection peer validation ------------------------------
+
+def resolve_and_validate(
+    host: str,
+    scope_items: tuple[str, ...],
+    allow_hostnames: bool = False,
+) -> str:
+    """Resolve a destination host to ONE in-scope IP address.
+
+    Literal IPs are validated directly. Hostnames are rejected outright unless
+    ``allow_hostnames`` is set. When hostnames are permitted, *every* address
+    the name resolves to must be inside the scope; otherwise the destination is
+    refused. This is the DNS-rebinding guard: a name that resolves to a mix of
+    in-scope and out-of-scope addresses can never be reached.
+    """
+    text = (host or "").strip()
+    try:
+        literal, _version = normalize_ip(text)
+    except ScopeError:
+        literal = None
+    if literal is not None:
+        return validate_target(literal, scope_items)
+    if not allow_hostnames:
+        raise ScopeError(
+            "Destination must be a literal IP address inside the authorized scope "
+            "(hostnames are not permitted)."
+        )
+    if not text or any(ch in text for ch in "/:@ \t\r\n[]"):
+        raise ScopeError("Hostname is malformed.")
+    try:
+        infos = socket.getaddrinfo(text, None, proto=socket.IPPROTO_TCP)
+    except socket.gaierror as exc:
+        raise ScopeError(f"Could not resolve hostname {text!r}: {exc}") from exc
+    addresses: list[str] = []
+    for info in infos:
+        candidate = info[4][0]
+        try:
+            normalized, _version = normalize_ip(str(candidate))
+        except ScopeError:
+            continue
+        if normalized not in addresses:
+            addresses.append(normalized)
+    if not addresses:
+        raise ScopeError(f"Hostname {text!r} did not resolve to any usable IP address.")
+    # Every resolved address must be in scope (blocks rebinding to a mixed set).
+    for address in addresses:
+        validate_target(address, scope_items)
+    return addresses[0]
+
+
+def validate_connected_peer(peer: str, scope_items: tuple[str, ...]) -> str:
+    """Validate the address we actually connected to against scope.
+
+    Applied after ``connect`` so the real peer — not just the requested
+    destination — is re-checked against the scope boundary.
+    """
+    try:
+        normalized, _version = normalize_ip(str(peer))
+    except ScopeError as exc:
+        raise ScopeError(
+            f"Connected peer address {peer!r} is not a usable literal IP."
+        ) from exc
+    return validate_target(normalized, scope_items)
+
+
+# --- scope change guard -----------------------------------------------------
+
+def scope_networks(
+    scope_items: tuple[str, ...],
+) -> list[ipaddress.IPv4Network | ipaddress.IPv6Network]:
+    return parse_scope(scope_items)
+
+
+def is_subset(inner: tuple[str, ...], outer: tuple[str, ...]) -> bool:
+    """True when every network in `inner` is contained within some `outer` net."""
+    inner_nets = parse_scope(inner)
+    outer_nets = parse_scope(outer)
+    return all(
+        any(
+            net.version == other.version and net.subnet_of(other)
+            for other in outer_nets
+        )
+        for net in inner_nets
+    )
+
+
+def describe_change(baseline: tuple[str, ...], candidate: tuple[str, ...]) -> str:
+    """Classify a scope change as 'same', 'narrow', or 'expand'."""
+    if tuple(candidate) == tuple(baseline):
+        return "same"
+    if is_subset(candidate, baseline):
+        return "narrow"
+    return "expand"
+
+
+@dataclass
+class ScopeManager:
+    """Holds the configured (baseline) scope and the effective scope.
+
+    The effective scope may only be narrowed silently. Any change that adds
+    coverage beyond the baseline is an *expansion* and requires the explicit
+    ``EXPAND_SCOPE_CONFIRMATION`` token. The model has no path to this object.
+    """
+
+    baseline: tuple[str, ...]
+    effective: tuple[str, ...] = ()
+    changes: list[dict] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        parse_scope(self.baseline)
+        if not self.effective:
+            self.effective = tuple(self.baseline)
+        else:
+            parse_scope(self.effective)
+            if not is_subset(self.effective, self.baseline):
+                raise ScopeError("Effective scope must be within the baseline scope.")
+
+    def classify(self, candidate: tuple[str, ...]) -> str:
+        items = tuple(str(x).strip() for x in candidate if str(x).strip())
+        parse_scope(items)
+        return describe_change(self.baseline, items)
+
+    def change(
+        self, candidate: tuple[str, ...], confirmation: str = ""
+    ) -> dict:
+        """Apply a scope change, guarding against accidental expansion.
+
+        Narrowing (or resetting to baseline) is applied directly. Expansion
+        beyond the baseline raises ScopeError unless the exact confirmation
+        token is supplied by the operator.
+        """
+        items = tuple(str(x).strip() for x in candidate if str(x).strip())
+        parse_scope(items)
+        before = self.effective
+        kind = describe_change(self.baseline, items)
+        if kind == "expand" and confirmation != EXPAND_SCOPE_CONFIRMATION:
+            raise ScopeError(
+                "Scope expansion requires an explicit operator confirmation "
+                f"(expected token {EXPAND_SCOPE_CONFIRMATION!r}). "
+                "The model cannot change scope."
+            )
+        self.effective = items
+        record = {
+            "before": list(before),
+            "after": list(items),
+            "kind": kind,
+            "authorization": "explicit" if kind == "expand" else "automatic-narrowing",
+            "at": datetime.now(UTC).isoformat(),
+        }
+        self.changes.append(record)
+        return record
+
+    def reset(self) -> dict:
+        return self.change(tuple(self.baseline))

@@ -95,39 +95,69 @@ never interpreted as a command.
 ## Tool package and registry (`gryphos/tools/`, `gryphos/analysis.py`)
 
 Every capability is a `ToolSpec` declaring: name, description, purpose, input
-schema, risk category, side effects, passive/active classification
-(`activity`), network flag, approval policy, timeout, output limit, scope
-requirements, a structured `result_schema`, an executor, and an optional
-`show()` that renders the exact action for approval and display.
-`build_registry(settings)` assembles the fixed set and returns it keyed by
-name; anything not returned there can never run. `validate_args()` rejects
-unknown properties, missing required fields, wrong types, and enum/min/max
-violations, so the model cannot inject flags, executables, or commands. Tools
-never use `shell=True`; binaries are resolved with `shutil.which` and invoked
-with fixed argv lists. `tools/__init__.py` re-exports the stable public API
-(`ToolError`, `ToolResult`, `ToolSpec`, `validate_args`, `build_registry`, and
-the nmap helpers).
+schema, risk category, **approval level (0-4)**, side effects, passive/active
+classification (`activity`), network flag, approval policy, timeout, output
+limit, scope requirements, a structured `result_schema`, an executor, and an
+optional `show()` that renders the exact action for approval and display.
+`build_registry(settings)` assembles the fixed set, **gated by the configured
+approval-level ceiling**, and returns it keyed by name; anything not returned
+there can never run. `ToolSpec.__post_init__` enforces that the level, coarse
+policy, activity, and network flag agree, so a tool cannot under-declare risk.
+`validate_args()` rejects unknown properties, missing required fields, wrong
+types, and enum/min/max violations, so the model cannot inject flags,
+executables, or commands. Tools never use `shell=True`; binaries are resolved
+with `shutil.which` and invoked with fixed argv lists. `tools/__init__.py`
+re-exports the stable public API (`ToolError`, `ToolResult`, `ToolSpec`,
+`validate_args`, `build_registry`, and the nmap helpers).
 
 Modules: `base.py` (interfaces, validation, bounded process runner), `net.py`
 (shared bounded HTTP/TLS helpers), `nmap.py`, `http.py`, `tls.py`, `tech.py`,
-`local_ports.py`, `local_audit.py`, `source_scan.py`, `dependency_audit.py`,
-`secret_detect.py`, and `registry.py`. `analysis.py` holds Tool 10.
+`tcp_banner.py`, `local_ports.py`, `local_audit.py`, `source_scan.py`,
+`dependency_audit.py`, `secret_detect.py`, and `registry.py`. `analysis.py`
+holds Tool 10.
 
-Registered tools and their policy:
+Registered tools and their policy, by approval level:
 
-- Active network (approval `explicit`, scope-enforced in code):
+- **Level 2 — network-active** (approval `explicit`, scope-enforced in code):
   - `nmap_basic` — literal in-scope IP; fixed argv `-n -Pn -sT -sV --top-ports 100 -T2 --reason`.
   - `http_headers` — literal in-scope IP + validated port/scheme; single HEAD request; cookies sanitized.
   - `http_redirects` — literal in-scope IP URL; manual redirect tracing; every hop re-authorized (off-scope or hostname hops blocked).
-  - `tls_cert` — literal in-scope IP; optional SNI hostname (validated); certificate verification never disabled.
+  - `tls_cert` — literal in-scope IP; optional SNI hostname (validated); certificate verification never disabled; connected peer re-validated.
   - `web_tech` — literal in-scope IP; bounded header + ≤8 KiB body fingerprint; no crawling; results labelled *inferred*; optional WhatWeb with stealth flags.
-- Passive local, read-only (no network, approval `none`):
+- **Level 3 — intrusive, tightly constrained** (approval `explicit`):
+  - `tcp_banner` — one TCP connection to a literal in-scope IP:port; reads an unprompted banner (no payload sent); tight timeout/output bounds; connected peer re-validated.
+- **Level 1 — passive local, read-only** (no network, approval `none`):
   - `local_ports` — `ss -ltunp`; classifies listeners local-only / interface-bound / wildcard-exposed.
   - `local_audit` — one read-only snapshot; modes `services`, `firewall`, `journal`, `lynis`; never elevates privileges.
   - `source_scan` — Bandit over a chosen directory; optional Semgrep with a **local** rules dir only (offline); source code and the `code` field are stripped from results.
   - `dependency_audit` — `pip-audit` on a manifest/lockfile; distinguishes *clean* from *data unavailable*; never upgrades.
   - `secret_detect` — gitleaks `--redact`; secret values, matches, and line text are stripped before output, evidence, logs, or model context; only rule + file:line are reported.
-- Offline analysis: `summarize_evidence` — reads recorded evidence only; produces facts, normalized observations, correlation, and contradictions.
+- **Level 0 — offline analysis**: `summarize_evidence` — reads recorded evidence only; produces facts, normalized observations, correlation, and contradictions.
+- **Level 4 — system modification**: none ship; disabled by default (the registry
+  ceiling defaults to 3; `GRYPHOS_MAX_APPROVAL_LEVEL` may raise it deliberately).
+
+## Approval policy and levels (`gryphos/approval.py`)
+
+Approval is governed by a five-level risk policy:
+
+| Level | Meaning | Approval |
+|---|---|---|
+| 0 | Internal evidence parsing and explanation | none (offline) |
+| 1 | Restricted, read-only local inspection | none (read-only) |
+| 2 | Network-active checks (Nmap, HTTP, TLS) | explicit |
+| 3 | More intrusive authorized assessment | explicit, tighter constraints |
+| 4 | System modifications / privileged actions | explicit, disabled by default |
+
+- `requires_approval(level)` is true for levels 2-4; `level_allowed(level, max)`
+  gates registration. Level 4 has no default max (ceiling 3).
+- `ApprovalRequest` carries the `approval_level`; the request record and the UI
+  include the level name, why the level applies, and the expected impact.
+- The prompt always shows the exact action and the expected impact and defaults
+  to **no**. Approval is bound to a SHA-256 fingerprint over canonical
+  `(tool, target, args)`, single-use, and default-deny; model text is never
+  authorization and cannot manufacture or reuse a decision.
+- Defense in depth: even if a tool somehow reached the registry, the agent
+  refuses any tool whose `approval_level` exceeds `max_approval_level`.
 
 ## Evidence analysis (Tool 10, `gryphos/analysis.py`)
 
@@ -160,14 +190,28 @@ Deterministic, offline reasoning over already-collected evidence:
   in-scope IP. **Hostnames are rejected** — there is no DNS resolution, which
   removes DNS-rebinding and redirect-to-name bypasses.
 - URL tools re-validate every redirect hop through `authorize_url`.
+- `resolve_and_validate(host, scope_items)` is the single connection gate: a
+  literal IP is checked directly; a hostname is only resolved when a tool
+  explicitly allows it, and **every** resolved address must be in scope (a mixed
+  answer is rejected) — so a rebinding record cannot slip through. Unresolvable
+  hosts are reported, never scanned.
+- `validate_connected_peer(peer, scope_items)` re-checks the address actually
+  connected to (e.g. after a TLS/TCP connect), catching any TOCTOU gap between
+  authorization and connection.
+- `ScopeManager` holds the **baseline** (from `GRYPHOS_ALLOWED_TARGETS`) and the
+  **effective** scope plus a change history. Narrowing (`is_subset`) is applied
+  silently; any expansion beyond the baseline requires the explicit operator
+  token `EXPAND_SCOPE_CONFIRMATION` (`EXPAND-SCOPE`). Malformed candidates and
+  effective-scope-outside-baseline states are errors. `reset()` restores the
+  baseline. `describe_change` explains a proposed change for display.
 
 Scope is checked at execution time, not just in the prompt, and the model cannot
-change it.
+change it — only the operator can, and only through the guarded CLI commands.
 
 ## Approval (`gryphos/approval.py`)
 
 - `ApprovalRequest` carries the tool, target, canonical args, display command,
-  network flag, limits, risk, and side effects.
+  network flag, limits, risk, side effects, and **approval level**.
 - `action_fingerprint` = SHA-256 over canonical `(tool, target, args)`; the
   model's free-text reason is display-only and not fingerprinted.
 - `ApprovalManager.record/authorize` enforces a single-use, exact-match decision;

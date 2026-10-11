@@ -149,6 +149,7 @@ def dependency_audit_spec(timeout: int, out_limit: int) -> ToolSpec:
         timeout=min(timeout, 120),
         max_output_chars=out_limit,
         activity="passive",
+        approval_level=1,
         scope_requirements="The named local manifest only.",
         result_schema={"type": "object", "properties": {
             "manifest": {"type": "string"},

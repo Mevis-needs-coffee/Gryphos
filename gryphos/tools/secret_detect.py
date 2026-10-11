@@ -135,6 +135,7 @@ def secret_detect_spec(timeout: int, out_limit: int) -> ToolSpec:
         timeout=min(timeout, 120),
         max_output_chars=out_limit,
         activity="passive",
+        approval_level=1,
         scope_requirements=(
             "The named local directory only. Results are rule + location with "
             "values stripped before leaving the tool."

@@ -242,6 +242,7 @@ def http_headers_spec(timeout: int, out_limit: int) -> ToolSpec:
         timeout=min(timeout, 30),
         max_output_chars=out_limit,
         activity="active",
+        approval_level=2,
         scope_requirements=(
             "Literal in-scope IP only; reserved/private/metadata destinations "
             "require explicit scope entry."
@@ -291,6 +292,7 @@ def http_redirects_spec(timeout: int, out_limit: int) -> ToolSpec:
         timeout=timeout,
         max_output_chars=out_limit,
         activity="active",
+        approval_level=2,
         scope_requirements=(
             "Initial host and every redirect hop must be a literal IP inside "
             "GRYPHOS_ALLOWED_TARGETS; no DNS resolution and no blind following."

@@ -99,6 +99,7 @@ def nmap_spec(timeout: int, out_limit: int) -> ToolSpec:
         timeout=timeout,
         max_output_chars=out_limit,
         activity="active",
+        approval_level=2,
         scope_requirements=(
             "Literal IP within GRYPHOS_ALLOWED_TARGETS; enforced in code at execution time."
         ),

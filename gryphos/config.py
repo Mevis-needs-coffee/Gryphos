@@ -29,6 +29,7 @@ _INT_SETTINGS: dict[str, tuple[int, int, int]] = {
     "GRYPHOS_MAX_RETRIES": (1, 0, 5),
     "GRYPHOS_TIME_BUDGET_SECONDS": (600, 30, 3600),
     "GRYPHOS_MODEL_CACHE_TTL": (300, 0, 86400),
+    "GRYPHOS_MAX_APPROVAL_LEVEL": (3, 0, 4),
 }
 
 
@@ -66,6 +67,7 @@ class Settings:
     max_retries: int = 1
     time_budget_seconds: int = 600
     model_cache_ttl: int = 300
+    max_approval_level: int = 3
     reports_dir: Path = field(default_factory=lambda: Path("reports"))
     log_dir: Path = field(default_factory=lambda: Path("logs"))
 
@@ -96,6 +98,7 @@ class Settings:
             "max_retries": self.max_retries,
             "time_budget_seconds": self.time_budget_seconds,
             "model_cache_ttl": self.model_cache_ttl,
+            "max_approval_level": self.max_approval_level,
             "reports_dir": str(self.reports_dir),
         }
 
@@ -123,4 +126,5 @@ def get_settings() -> Settings:
         max_retries=_int_env("GRYPHOS_MAX_RETRIES"),
         time_budget_seconds=_int_env("GRYPHOS_TIME_BUDGET_SECONDS"),
         model_cache_ttl=_int_env("GRYPHOS_MODEL_CACHE_TTL"),
+        max_approval_level=_int_env("GRYPHOS_MAX_APPROVAL_LEVEL"),
     )

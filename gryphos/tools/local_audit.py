@@ -109,6 +109,7 @@ def local_audit_spec(timeout: int, out_limit: int) -> ToolSpec:
         timeout=min(timeout, 30),
         max_output_chars=out_limit,
         activity="passive",
+        approval_level=1,
         scope_requirements="No network targets; inspects the local host only.",
         result_schema={"type": "object", "properties": {
             "mode": {"type": "string"},
