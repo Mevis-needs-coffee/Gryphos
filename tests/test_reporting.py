@@ -6,6 +6,8 @@ import json
 
 from gryphos.reporting import (
     build_report_context,
+    escape_code,
+    escape_markdown,
     extract_confirmed_observations,
     generate_reports,
     render_markdown,
@@ -166,3 +168,72 @@ def test_findings_remediation_section(sample_session):
     })
     md = render_markdown(sample_session, build_report_context(sample_session))
     assert "Enable HSTS" in md
+
+
+def test_escape_helpers():
+    # Links are neutralized; newlines collapse; backticks cannot break a code span.
+    assert escape_markdown("[click](http://evil)") == r"\[click\](http://evil)"
+    assert "a\nb" not in escape_markdown("a\nb")
+    assert escape_markdown("a\nb") == "a b"
+    assert escape_code("a`b") == "a'b"
+    assert "<script>" not in escape_markdown("<script>")
+    assert r"\<script\>" in escape_markdown("<script>")
+
+
+def test_markdown_link_injection_neutralized():
+    session = Session(
+        session_id=new_session_id(), objective="o",
+        scope_snapshot=("127.0.0.1/32",), model="m",
+    )
+    session.findings.append({
+        "title": "[click](http://evil.example)", "severity": "low", "confidence": "low",
+        "detail": "see [here](javascript:alert(1))", "remediation": "fix it",
+    })
+    session.record_error("model", "boom [x](http://evil.example)")
+    md = render_markdown(session, build_report_context(session))
+    # The clickable anchor sequences are gone; brackets are escaped everywhere.
+    assert "[click](http://evil.example)" not in md
+    assert "[here](javascript:alert(1))" not in md
+
+
+def test_multiline_untrusted_prose_fenced():
+    session = Session(
+        session_id=new_session_id(), objective="o",
+        scope_snapshot=("127.0.0.1/32",), model="m",
+    )
+    hostile = "real line\n- [x] forged list item\n```fake fence```"
+    session.final_assessment = hostile
+    md = render_markdown(session, build_report_context(session))
+    # Multi-line untrusted prose is wrapped in a longer fence (4 backticks here,
+    # because the content itself contains a triple-backtick run).
+    assert "````text\nreal line\n- [x] forged list item\n```fake fence```\n````" in md
+
+
+def test_no_open_ports_secure_caveat_present(sample_session):
+    md = render_markdown(sample_session, build_report_context(sample_session))
+    assert "does NOT mean the system is secure" in md
+    assert "No CVE identifiers" in md
+    assert "unverified hypotheses" in md.lower()
+
+
+def test_overlapping_fences_do_not_break_executive_summary(tmp_path):
+    # Multi-line fallback finals (Phase Eight) render as an extra-safe fence.
+    session = Session(
+        session_id=new_session_id(), objective="o",
+        scope_snapshot=("127.0.0.1/32",), model="m",
+    )
+    session.final_assessment = (
+        "AI request failed: API server down\n\nEvidence collected so far:\n"
+        "Evidence summary: 1 fact(s), 1 tool result(s)\n- 127.0.0.1: 2 open port(s)"
+    )
+    json_path, md_path = generate_reports(session, tmp_path)
+    md = md_path.read_text(encoding="utf-8")
+    assert "Evidence summary: 1 fact(s)" in md
+    assert json.loads(json_path.read_text(encoding="utf-8"))["final_assessment"]
+
+
+def test_incomplete_check_note_for_missing_tools(sample_session):
+    md = render_markdown(sample_session, build_report_context(sample_session))
+    assert "was not executed" in md
+    for name in ("http_headers", "tls_cert", "http_redirects"):
+        assert f"{name} was not executed" in md

@@ -35,6 +35,43 @@ def _fence(text: str) -> str:
     return f"{fence}text\n{body}\n{fence}"
 
 
+# Characters that restructure Markdown/HTML when placed inline: code spans,
+# links, and raw HTML. Emphasis markers and mid-line '#'/'-' cannot restructure
+# content, and newlines are neutralized separately (see escape_markdown).
+_MD_INLINE_SPECIALS = {"\\", "`", "[", "]", "<", ">"}
+
+
+def escape_markdown(value: str) -> str:
+    """Render an untrusted value as inline Markdown, neutralizing structure.
+
+    Backslashes, backticks, link brackets, and HTML angle brackets are escaped so
+    a hostile banner/header/model response cannot inject code spans, clickable
+    links, or markup into the report. Newlines become spaces so a value cannot
+    forge a list item, heading, or block.
+    """
+    text = redact(str(value))
+    text = text.replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
+    return "".join(
+        f"\\{ch}" if ch in _MD_INLINE_SPECIALS else ch
+        for ch in text
+    )
+
+
+def escape_code(value: str) -> str:
+    """Escape a value destined for a backtick code span."""
+    text = redact(str(value))
+    text = text.replace("`", "'").replace("\r", " ").replace("\n", " ")
+    return text
+
+
+def _inline_or_fence(value: str) -> list[str]:
+    """Render untrusted prose: inline (escaped) or fenced when multi-line."""
+    text = redact(str(value))
+    if "\n" in text:
+        return [_fence(text)]
+    return [escape_markdown(text)]
+
+
 def _describe_port(port: dict) -> str:
     text = str(port.get("port", "?"))
     service = port.get("service")
@@ -220,18 +257,18 @@ def render_markdown(session: Session, ctx: dict) -> str:
     add = lines.append
     add("# Gryphos Assessment Report")
     add("")
-    add(f"- **Session ID:** `{session.session_id}`")
-    add(f"- **Created:** {session.created_at}")
-    add(f"- **Completed:** {session.completed_at or '(in progress)'}")
-    add(f"- **Model:** `{session.model}`")
-    add(f"- **Objective:** {session.objective}")
-    add(f"- **Target:** `{session.target or '(none)'}`")
+    add(f"- **Session ID:** `{escape_code(session.session_id)}`")
+    add(f"- **Created:** {escape_markdown(session.created_at)}")
+    add(f"- **Completed:** {escape_markdown(session.completed_at or '(in progress)')}")
+    add(f"- **Model:** `{escape_code(session.model)}`")
+    add(f"- **Objective:** {escape_markdown(session.objective)}")
+    add(f"- **Target:** `{escape_code(session.target or '(none)')}`")
     add("")
 
     add("## 1. Executive summary")
     add("")
     if session.final_assessment:
-        add(session.final_assessment)
+        lines.extend(_inline_or_fence(session.final_assessment))
         add("")
     else:
         add("_No final assessment was recorded for this session._")
@@ -240,7 +277,7 @@ def render_markdown(session: Session, ctx: dict) -> str:
         worst = ctx["findings"][0]
         add(
             f"Model-recorded findings: {len(ctx['findings'])} "
-            f"(highest severity: {worst.get('severity', 'informational')}). "
+            f"(highest severity: {escape_markdown(worst.get('severity', 'informational'))}). "
             "Findings are model interpretations of the evidence below and require "
             "operator verification."
         )
@@ -258,7 +295,7 @@ def render_markdown(session: Session, ctx: dict) -> str:
     add("## 3. Authorized scope")
     add("")
     for item in session.scope_snapshot:
-        add(f"- `{item}`")
+        add(f"- `{escape_code(item)}`")
     if not session.scope_snapshot:
         add("- (no scope snapshot recorded)")
     add("")
@@ -268,7 +305,7 @@ def render_markdown(session: Session, ctx: dict) -> str:
 
     add("## 4. Objective and methodology")
     add("")
-    add(f"**Objective:** {session.objective}")
+    add(f"**Objective:** {escape_markdown(session.objective)}")
     add("")
     add("Gryphos proposes registered tools; every network-active action requires "
         "explicit operator approval. Arguments are validated against fixed schemas; "
@@ -279,9 +316,9 @@ def render_markdown(session: Session, ctx: dict) -> str:
     add("")
     if session.tool_runs:
         for index, run in enumerate(session.tool_runs, 1):
-            add(f"### 5.{index} `{run.get('tool', '?')}` on `{run.get('target', '?')}`")
+            add(f"### 5.{index} `{escape_code(run.get('tool', '?'))}` on `{escape_code(run.get('target', '?'))}`")
             add("")
-            add(f"- Exact action: `{run.get('command', '')}`")
+            add(f"- Exact action: `{escape_code(run.get('command', ''))}`")
             add(f"- Return code: `{run.get('returncode')}`")
             if run.get("started_at"):
                 add(f"- Started: {run['started_at']}")
@@ -301,8 +338,10 @@ def render_markdown(session: Session, ctx: dict) -> str:
             mark = {"approved": "APPROVED", "declined": "DECLINED", "cancelled": "CANCELLED"}.get(
                 str(decision.get("decision")), str(decision.get("decision", "?")).upper()
             )
-            add(f"- [{mark}] `{decision.get('tool', '?')}` on `{decision.get('target', '?')}` "
-                f"at {decision.get('requested_at', '?')} (fingerprint `{str(decision.get('fingerprint', ''))[:12]}…`)")
+            add(f"- [{mark}] `{escape_code(decision.get('tool', '?'))}` on "
+                f"`{escape_code(decision.get('target', '?'))}` at "
+                f"{escape_markdown(decision.get('requested_at', '?'))} "
+                f"(fingerprint `{escape_code(str(decision.get('fingerprint', '')))[:12]}…`)")
     else:
         add("_No approval requests were made._")
     add("")
@@ -311,7 +350,7 @@ def render_markdown(session: Session, ctx: dict) -> str:
     add("")
     if ctx["observations"]:
         for index, obs in enumerate(ctx["observations"], 1):
-            add(f"{index}. **[{obs['source']}]** {obs['observation']}")
+            add(f"{index}. **[{escape_code(obs['source'])}]** {escape_markdown(obs['observation'])}")
     else:
         add("_No confirmed observations; no tool evidence was recorded._")
     add("")
@@ -319,10 +358,10 @@ def render_markdown(session: Session, ctx: dict) -> str:
         add("### 7a. Cross-tool correlation")
         add("")
         for group in ctx["correlation"]:
-            add(f"- `{group['target']}` — tools: {', '.join(group['tools'])} "
+            add(f"- `{escape_code(group['target'])}` — tools: {', '.join(escape_code(t) for t in group['tools'])} "
                 f"({group['observation_count']} observation(s))")
             for note in group["notes"]:
-                add(f"  - {note}")
+                add(f"  - {escape_markdown(note)}")
         add("")
     if ctx["contradictions"]:
         add("### 7b. Cross-tool contradictions")
@@ -331,24 +370,27 @@ def render_markdown(session: Session, ctx: dict) -> str:
             "they are not resolved automatically._")
         add("")
         for item in ctx["contradictions"]:
-            add(f"- **[{item.get('severity', 'medium')}]** {item['message']}")
+            add(f"- **[{escape_code(item.get('severity', 'medium'))}]** {escape_markdown(item['message'])}")
         add("")
 
     add("## 8. Findings (model interpretations)")
     add("")
-    add("_The following findings were produced by the AI model. They are "
-        "interpretations of the evidence, not confirmed vulnerabilities, unless "
-        "an observation above explicitly proves the condition._")
+    add("_The findings below are the AI model's interpretations and **unverified "
+        "hypotheses**. They are not confirmed vulnerabilities unless an observation "
+        "in section 7 explicitly proves the condition. Treat every finding as "
+        "requiring operator verification and manual confirmation before action. "
+        "Technology labels inferred by `web_tech` are not verified._")
     add("")
     if ctx["findings"]:
         for f in ctx["findings"]:
-            add(f"### {f.get('title', '(untitled)')}")
+            add(f"### {escape_markdown(f.get('title', '(untitled)'))}")
             add("")
-            add(f"- Severity: **{f.get('severity', 'informational')}**")
-            add(f"- Confidence: **{f.get('confidence', 'medium')}**")
+            add(f"- Severity: **{escape_markdown(f.get('severity', 'informational'))}**")
+            add(f"- Confidence: **{escape_markdown(f.get('confidence', 'medium'))}**")
             add("")
-            if f.get("detail"):
-                add(str(f["detail"]))
+            detail = str(f.get("detail") or "").strip()
+            if detail:
+                lines.extend(_inline_or_fence(detail))
                 add("")
     else:
         add("_No findings recorded._")
@@ -359,7 +401,14 @@ def render_markdown(session: Session, ctx: dict) -> str:
     remedi = [f for f in ctx["findings"] if f.get("remediation")]
     if remedi:
         for f in remedi:
-            add(f"- **{f.get('title', 'Finding')}:** {f['remediation']}")
+            title = escape_markdown(f.get('title', 'Finding'))
+            remediation = str(f.get("remediation") or "")
+            if "\n" in redact(remediation):
+                add(f"- **{title}:**")
+                add("")
+                lines.extend(_fence(remediation).splitlines())
+            else:
+                add(f"- **{title}:** {escape_markdown(remediation)}")
     else:
         add("_No model-supplied remediation guidance was recorded. Follow your "
             "organization's hardening baselines for any exposed services._")
@@ -368,9 +417,16 @@ def render_markdown(session: Session, ctx: dict) -> str:
     add("## 10. Limitations and untested areas")
     add("")
     for item in ctx["not_performed"]:
-        add(f"- {item}")
+        add(f"- {escape_markdown(item)}")
     add("- Only approved, registered checks were performed; this is not a full "
         "vulnerability assessment.")
+    add("- An absence of open ports on a bounded probe does NOT mean the system is "
+        "secure: services may be listening on ports outside the probed set, the "
+        "probe covers only an approved subset, and closed/filtered results can "
+        "mask a stateful host firewall.")
+    add("- No CVE identifiers, affected-version claims, or external vulnerability "
+        "references are asserted. Candidate findings are unverified hypotheses, "
+        "not confirmed vulnerabilities.")
     add("- Service versions reported by scanners can be inaccurate; verify manually.")
     add("- No exploitation, credential testing, evasion, or persistence was attempted.")
     add("")
@@ -379,7 +435,14 @@ def render_markdown(session: Session, ctx: dict) -> str:
     add("")
     if session.errors:
         for err in session.errors:
-            add(f"- [{err.get('source', '?')}] {err.get('message', '')}")
+            source = escape_code(err.get('source', '?'))
+            message = str(err.get('message', ''))
+            if "\n" in redact(message):
+                add(f"- [{source}]")
+                add("")
+                lines.extend(_fence(message).splitlines())
+            else:
+                add(f"- [{source}] {escape_markdown(message)}")
     else:
         add("_No errors recorded._")
     add("")
@@ -387,8 +450,8 @@ def render_markdown(session: Session, ctx: dict) -> str:
     add("## 12. Record")
     add("")
     add(f"- Generated: {datetime.now(UTC).isoformat()}")
-    add(f"- Session ID: `{session.session_id}`")
-    add(f"- JSON evidence: `{session.report_json or '(pending)'}`")
+    add(f"- Session ID: `{escape_code(session.session_id)}`")
+    add(f"- JSON evidence: `{escape_code(session.report_json or '(pending)')}`")
     add("")
     add("> Review and sanitize this report before sharing; scan output may contain "
         "sensitive host information. AI-generated interpretations are hypotheses, "

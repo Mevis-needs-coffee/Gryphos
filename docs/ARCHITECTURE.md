@@ -270,6 +270,18 @@ therefore requires fresh approval. Model output cannot manufacture approval.
   other. Confirmed observations are derived deterministically from tool output;
   model findings are labelled interpretations. Untrusted output is fenced with a
   backtick run longer than any in the content.
+- **Untrusted values are escaped before Markdown interpolation.** Tool output is
+  fenced; every other dynamic value (headers, banners, `subject_cn`, redirect
+  hosts, tech labels, model findings, error messages, identifiers) passes
+  through `escape_markdown` (escapes `\`, `` ` ``, `[`, `]`, `<`, `>`, and
+  collapses newlines so a hostile value cannot forge links, code spans, HTML, or
+  list items) or `escape_code` for backtick spans. Multi-line prose (executive
+  summary, finding detail, error messages) is rendered as a safe code fence.
+- The report never claims a system is secure because a bounded probe found no
+  open ports, never asserts CVE identifiers or affected versions, and labels
+  every finding an **unverified hypothesis** requiring operator confirmation —
+  separating observed facts, model interpretations, potential risks, and checks
+  that were not performed.
 - `sessions` lists saved sessions; `inspect <id>` shows a read-only summary of
   a known session (metadata, counts, findings, approvals, errors) without
   regenerating reports or replaying anything.

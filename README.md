@@ -43,6 +43,10 @@ arbitrary shell commands and will not scan anything outside your scope.
   rejected), prefers the least intrusive useful action, recovers from bounded
   transient API failures, and when the AI is unavailable concludes with an
   evidence-only summary rather than inventing results.
+- Professional reports that never overstate: untrusted values are Markdown/HTML
+  escaped before rendering, an absence of open ports is never called "secure",
+  no CVE identifiers are asserted, and every finding is labelled an unverified
+  hypothesis distinct from observed facts.
 
 ## Registered tools
 
