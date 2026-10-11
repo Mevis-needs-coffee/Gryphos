@@ -49,8 +49,14 @@ class FakeLLM:
         self.model = model
         self.calls: list[dict] = []
 
-    def decide(self, objective, target, evidence, step, system_prompt, history=None):
-        self.calls.append({"objective": objective, "target": target, "step": step, "evidence": list(evidence)})
+    def decide(self, objective, target, evidence, step, system_prompt, history=None, evidence_digest=None):
+        self.calls.append({
+            "objective": objective,
+            "target": target,
+            "step": step,
+            "evidence": list(evidence),
+            "evidence_digest": evidence_digest,
+        })
         if not self.script:
             return FinalDecision(kind="final", message="Scripted LLM exhausted; finalizing.")
         item = self.script.pop(0)

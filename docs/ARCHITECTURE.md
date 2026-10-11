@@ -49,22 +49,44 @@ of evidence.
 ```
 validate session target against scope
 loop up to max_agent_steps and until time budget:
-    ask LLM for a decision (with objective, target, bounded evidence, history)
+    digest = summary of confirmed evidence (analysis.summarize_evidence, offline)
+    ask LLM for a decision (objective, target, bounded evidence, evidence digest, history)
     ├─ final          → print analysis, record findings, stop
     ├─ error          → record, stop
     ├─ clarification  → ask the operator, record answer, continue
     └─ tool_call
-         ├─ tool not registered?            → reject (counts toward failure streak)
-         ├─ args fail schema validation?    → reject
-         ├─ target out of scope / mismatch? → reject
+         ├─ tool not registered?              → reject (counts toward failure streak)
+         ├─ approval level exceeds ceiling?   → reject
+         ├─ no justification (empty reason)?  → reject
+         ├─ args fail schema validation?      → reject
+         ├─ target out of scope / mismatch?   → reject
          ├─ duplicate of an already-run action? → skip, ask model for analysis
          ├─ network-active? → require approval (default deny)
          │     ├─ declined            → record refusal, do not execute
          │     └─ approved (fingerprint, single-use) → execute
          └─ execute registered tool → record result → reset failure streak
     if consecutive_failures ≥ 3 → abort safely
-after loop → steps exhausted (safe stop)
+after loop → steps exhausted (safe stop with collected-evidence digest)
 ```
+
+The loop follows a **reasoning discipline** (also encoded in the system prompt):
+1. understand the objective; 2. check the **confirmed-evidence digest** before
+proposing anything; 3. name the specific missing information; 4. choose the
+least intrusive useful step — propose a tool **only** when it fills a real gap;
+5. justify it (an empty `reason` is rejected by the controller); 6. conclude
+honestly, citing recorded evidence and saying plainly when evidence is
+insufficient.
+
+Resilience to API failures:
+
+- A transient LLM failure (`rate_limit`, `timeout`, `connection`, `server_error`)
+  no longer destroys the run — the same step is resumed up to
+  `AGENT_TRANSIENT_RESUME_LIMIT` (2) times, recorded as a session warning.
+- Non-transient failures (auth, policy, invalid output) stop immediately.
+- On failure the agent returns an **evidence-based fallback final**: a
+  deterministic digest of the confirmed evidence, explicitly labelled "not an AI
+  interpretation", and states when nothing can be concluded. It never invents
+  results.
 
 Bounds and safety rules:
 
@@ -74,6 +96,8 @@ Bounds and safety rules:
 - Three consecutive rejected/failed proposals abort the run.
 - Every tool error is recorded; the loop continues only when it is safe to.
 - `KeyboardInterrupt`/EOF during approval cancels without executing.
+- Early stops (`steps_exhausted`, `time_budget`, failure-streak abort) print and
+  record the collected-evidence digest in `final_assessment`.
 
 ## Decision schema (`gryphos/models.py`)
 

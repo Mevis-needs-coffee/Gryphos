@@ -19,6 +19,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
 
+from .analysis import summarize_evidence
 from .approval import (
     ApprovalManager,
     ApprovalRequest,
@@ -40,6 +41,11 @@ from .tools import ToolError, ToolResult, ToolSpec, validate_args
 log = logging.getLogger("gryphos.agent")
 
 MAX_CONSECUTIVE_FAILURES = 3
+
+# Transient API failures the agent will safely resume from (bounded) instead of
+# killing the whole run. Anything else — auth, policy, coding errors — is fatal.
+_TRANSIENT_CATEGORIES = {"rate_limit", "timeout", "connection", "server_error", "transient"}
+AGENT_TRANSIENT_RESUME_LIMIT = 2
 
 
 @dataclass
@@ -137,21 +143,20 @@ class Agent:
 
         for step in range(1, self.settings.max_agent_steps + 1):
             if time.monotonic() > deadline:
-                return self._stop("time_budget", "Time budget exhausted. Stopping safely.")
+                return self._stop_with_evidence(
+                    "time_budget", "Time budget exhausted. Stopping safely.")
+            # Deterministic, offline digest of the confirmed evidence so the model
+            # reasons from facts already recorded (analysis.summarize_evidence).
+            digest = summarize_evidence(self.evidence).output
             try:
-                decision = self.llm.decide(
-                    objective=objective,
-                    target=safe_target,
-                    evidence=self.evidence,
-                    step=step,
-                    system_prompt=self.system_prompt,
-                    history=self.session.history,
-                )
+                decision = self._decide(objective, safe_target, step, digest)
             except LLMError as exc:
                 log.error("LLM failure at step %s: %s", step, exc)
                 self.session.record_error("llm", str(exc))
                 self.console.print(f"[red]AI request failed:[/red] {exc}")
-                return self._stop("failed", f"AI request failed: {exc}", errors=[str(exc)])
+                # Safe recovery: conclude from the confirmed evidence instead of
+                # leaving the operator with nothing, and say analysis stopped.
+                return self._fallback_final(f"AI request failed: {exc}")
 
             if isinstance(decision, FinalDecision):
                 return self._finalize(decision)
@@ -189,16 +194,50 @@ class Agent:
             if outcome is not None:
                 return outcome
             if self._failure_streak >= MAX_CONSECUTIVE_FAILURES:
-                return self._stop(
+                return self._stop_with_evidence(
                     "failed",
                     f"Aborting after {self._failure_streak} consecutive rejected or failed "
                     "tool proposals. Review the evidence above.",
                 )
 
-        return self._stop(
+        return self._stop_with_evidence(
             "steps_exhausted",
             "Maximum agent steps reached. Review the evidence above; no further tools will run.",
         )
+
+    def _decide(self, objective: str, target: str | None, step: int, digest: str):
+        """Ask the model for one decision, resuming on bounded transient API failures.
+
+        A transient failure (rate limit, timeout, connection, server error) does not
+        destroy the run: the same step is retried a bounded number of times with full
+        evidence preserved. Non-transient errors propagate so the caller can conclude
+        safely from confirmed evidence.
+        """
+        last_exc: LLMError | None = None
+        for attempt in range(AGENT_TRANSIENT_RESUME_LIMIT + 1):
+            if attempt:
+                msg = (
+                    f"Transient LLM failure at step {step} "
+                    f"(category={last_exc.category}); resuming the reasoning loop."
+                )
+                self.session.warnings.append(msg)
+                self.console.print(f"[dim]{msg}[/dim]")
+            try:
+                return self.llm.decide(
+                    objective=objective,
+                    target=target,
+                    evidence=self.evidence,
+                    step=step,
+                    system_prompt=self.system_prompt,
+                    history=self.session.history,
+                    evidence_digest=digest,
+                )
+            except LLMError as exc:
+                if exc.category not in _TRANSIENT_CATEGORIES or attempt >= AGENT_TRANSIENT_RESUME_LIMIT:
+                    raise
+                last_exc = exc
+        raise LLMError(  # pragma: no cover - unreachable after bounded resume
+            "Agent transient resume limit exceeded.", category="transient", retryable=True)
 
     # -- tool handling -------------------------------------------------------
 
@@ -231,6 +270,21 @@ class Agent:
             msg = (
                 f"Rejected tool {tool_name!r}: approval level {spec.approval_level} "
                 f"exceeds the configured maximum ({self.max_approval_level})."
+            )
+            self.console.print(f"[red]{msg}[/red]")
+            self.evidence.append({"kind": "rejected", "tool": tool_name, "reason": msg})
+            self.session.record_error("agent", msg)
+            self._note_failure()
+            return None
+
+        # Reasoning gate: a tool must be proposed because a specific piece of
+        # missing information is needed. An empty justification means the model
+        # did not establish necessity — reject rather than run on autopilot.
+        if not (decision.reason or "").strip():
+            msg = (
+                f"Rejected tool proposal {tool_name!r}: no justification was given. "
+                "A registered tool should only be proposed when a specific piece of "
+                "missing information is needed that existing evidence cannot answer."
             )
             self.console.print(f"[red]{msg}[/red]")
             self.evidence.append({"kind": "rejected", "tool": tool_name, "reason": msg})
@@ -364,12 +418,42 @@ class Agent:
     def _stop(self, status: str, message: str, errors: list[str] | None = None) -> AgentOutcome:
         border = {"cancelled": "yellow", "failed": "red"}.get(status, "yellow")
         self.console.print(Panel(message, title="Stopped", border_style=border))
+        self.session.final_assessment = message
         return AgentOutcome(
             status=status,
             final_message=message,
             evidence=self.evidence,
             errors=errors or [],
         )
+
+    def _stop_with_evidence(self, status: str, message: str) -> AgentOutcome:
+        """Stop early but ground the stop in the confirmed evidence digest."""
+        if any(e.get("kind") == "tool_result" for e in self.evidence):
+            message += "\n\nEvidence collected so far:\n"
+            message += summarize_evidence(self.evidence).output
+        return self._stop(status, message)
+
+    def _fallback_final(self, reason: str) -> AgentOutcome:
+        """Deterministic, evidence-based conclusion when the model is unavailable.
+
+        Never invents results: it summarizes only the confirmed evidence and says
+        plainly that the AI analysis could not be completed.
+        """
+        digest = summarize_evidence(self.evidence)
+        has_evidence = any(e.get("kind") == "tool_result" for e in self.evidence)
+        message = (
+            f"{reason}\n\nThe AI is unavailable, so this is a deterministic summary of the "
+            f"confirmed evidence only — it is not an AI interpretation.\n\n{digest.output}"
+        )
+        if not has_evidence:
+            message += (
+                "\n\nNo tool evidence was collected and the AI is unavailable. "
+                "Nothing can yet be concluded; retry the assessment when the API recovers."
+            )
+        self.session.final_assessment = message
+        self.console.print(Panel(
+            message, title="Assessment stopped — confirmed evidence", border_style="red"))
+        return AgentOutcome(status="failed", final_message=message, evidence=self.evidence, errors=[reason])
 
 
 def run_agent(

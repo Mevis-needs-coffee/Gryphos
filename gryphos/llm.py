@@ -76,6 +76,22 @@ any network-active tool runs.
 Available tools (the ONLY tools that exist; never invent names):
 {tool_docs}
 
+Reasoning discipline — apply in this order for EVERY response:
+1. Understand: restate what the objective requires and which target is authorized.
+2. Check evidence: before proposing anything, review the confirmed evidence in the
+   request (tool results, the `confirmed_evidence` digest, contradictions). Prefer
+   it over re-running tools.
+3. Identify the gap: name the specific missing information that still blocks an
+   honest conclusion.
+4. Choose the least intrusive useful next step. Propose a registered tool ONLY when
+   it fills a real gap. Do not propose tools that merely repeat what is already
+   known, add no new information, or are unnecessary for the objective.
+5. Justify: `reason` must state the exact missing information this step will add and
+   why it matters. Never leave `reason` empty or generic.
+6. Conclude honestly: `final` must cite the recorded evidence each claim rests on.
+   If the evidence is insufficient to answer the objective, say so plainly and list
+   which checks are still missing instead of inventing results.
+
 Rules:
 - Propose at most ONE tool call per response, using the exact tool name and argument schema.
 - Targets must be the authorized target IP given in the request, unless the user explicitly
@@ -91,7 +107,7 @@ Rules:
 - If there is no useful evidence, say so plainly instead of inventing results.
 
 Return exactly ONE JSON object and nothing else, using one of these shapes:
-{{"kind":"tool_call","tool":"<name>","args":{{...}},"reason":"why this step is useful"}}
+{{"kind":"tool_call","tool":"<name>","args":{{...}},"reason":"which missing information this step adds and why"}}
 {{"kind":"final","message":"analysis for the operator","findings":[{{"title":"...","severity":"informational|low|medium|high|critical","confidence":"low|medium|high","detail":"...","remediation":"..."}}]}}
 {{"kind":"clarification","question":"what do you need from the operator?"}}
 {{"kind":"error","message":"why the request cannot proceed safely"}}
@@ -246,16 +262,21 @@ class GryphosLLM:
         step: int,
         system_prompt: str,
         history: list[dict] | None = None,
+        evidence_digest: str | None = None,
     ) -> AgentDecision:
         """Request one structured decision; parse and validate it.
 
         Invalid output triggers ONE bounded repair attempt before LLMOutputError.
+        `evidence_digest` is a deterministic, offline digest of confirmed evidence
+        (see analysis.summarize_evidence) that keeps the model's decisions grounded
+        in what was actually observed.
         """
         user_payload = {
             "objective": objective,
             "authorized_target": target,
             "step": step,
             "evidence_so_far": _bounded_evidence(evidence),
+            "confirmed_evidence": evidence_digest,
             "conversation": _bounded_history(history),
             "instruction": (
                 "Choose at most one available tool call, or return final, "

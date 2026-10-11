@@ -38,6 +38,11 @@ arbitrary shell commands and will not scan anything outside your scope.
 - Classified API errors (auth, permission, rate limit, timeout, context length,
   server errors) with safe, actionable messages.
 - Secret redaction in logs; API keys never printed or persisted.
+- Disciplined reasoning: the agent checks a deterministic digest of confirmed
+  evidence before each step, must justify every tool proposal (empty `reason` is
+  rejected), prefers the least intrusive useful action, recovers from bounded
+  transient API failures, and when the AI is unavailable concludes with an
+  evidence-only summary rather than inventing results.
 
 ## Registered tools
 
