@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from .analysis import correlate, detect_contradictions
+from .logging_setup import redact
 from .session import Session
 
 SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "informational": 4}
@@ -397,15 +398,21 @@ def render_markdown(session: Session, ctx: dict) -> str:
 
 
 def generate_reports(session: Session, directory: Path) -> tuple[Path, Path]:
-    """Write `<session_id>.json` evidence and `<session_id>.md` report."""
+    """Write `<session_id>.json` evidence and `<session_id>.md` report.
+
+    The JSON payload is the session record itself (with an embedded
+    `report_context`), so `SessionStore.save` and this writer produce identical,
+    redacted content and neither clobbers the other.
+    """
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     ctx = build_report_context(session)
     json_path = directory / f"{session.session_id}.json"
     md_path = directory / f"{session.session_id}.md"
 
-    payload = session.to_dict()
-    payload["report_context"] = {
+    session.report_json = str(json_path)
+    session.report_markdown = str(md_path)
+    session.report_context = {
         "confirmed_observations": [
             {"source": o["source"], "observation": o["observation"]} for o in ctx["observations"]
         ],
@@ -414,11 +421,8 @@ def generate_reports(session: Session, directory: Path) -> tuple[Path, Path]:
         "correlation": ctx["correlation"],
         "contradictions": ctx["contradictions"],
     }
-    session.report_json = str(json_path)
-    session.report_markdown = str(md_path)
-    payload["report_json"] = str(json_path)
-    payload["report_markdown"] = str(md_path)
 
-    _atomic_write(json_path, json.dumps(payload, indent=2, default=str))
-    _atomic_write(md_path, render_markdown(session, ctx))
+    # `to_dict()` redacts secrets and bounds size; the Markdown is redacted too.
+    _atomic_write(json_path, json.dumps(session.to_dict(), indent=2, default=str))
+    _atomic_write(md_path, redact(render_markdown(session, ctx)))
     return json_path, md_path

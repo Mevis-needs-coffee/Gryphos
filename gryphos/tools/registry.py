@@ -10,7 +10,6 @@ is disabled by default) are never registered.
 
 from __future__ import annotations
 
-from ..analysis import summarize_evidence_spec
 from ..approval import DEFAULT_MAX_ENABLED_LEVEL, level_allowed
 from .base import ToolSpec
 from .dependency_audit import dependency_audit_spec
@@ -26,6 +25,9 @@ from .tls import tls_cert_spec
 
 
 def build_registry(settings) -> dict[str, ToolSpec]:
+    # Imported lazily to avoid the analysis -> tools -> registry cycle.
+    from ..analysis import summarize_evidence_spec
+
     timeout = int(getattr(settings, "command_timeout", 60))
     out_limit = int(getattr(settings, "max_output_chars", 5000))
     max_level = int(getattr(settings, "max_approval_level", DEFAULT_MAX_ENABLED_LEVEL))

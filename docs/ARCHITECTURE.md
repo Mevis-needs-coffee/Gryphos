@@ -19,7 +19,7 @@ of evidence.
 | `gryphos/approval.py` | Approval requests with SHA-256 action fingerprints; single-use, default-deny. |
 | `gryphos/tools/` | Modular tool package: `base.py` (interfaces + validation), `net.py` (bounded HTTP/TLS helpers), one module per tool, `registry.py` (`build_registry`). |
 | `gryphos/analysis.py` | Offline evidence analysis (Tool 10): normalization, cross-tool correlation, contradiction detection, session comparison, and the passive `summarize_evidence` tool. |
-| `gryphos/session.py` | Session records and atomic JSON persistence; legacy + corrupt-file tolerance. |
+| `gryphos/session.py` | Session records and atomic JSON persistence: full evidence stream, legacy + corrupt-file tolerance, size limits, secret redaction. |
 | `gryphos/reporting.py` | Markdown report + JSON evidence generation (includes correlation and contradiction sections). |
 
 ## Trust boundaries
@@ -222,18 +222,39 @@ therefore requires fresh approval. Model output cannot manufacture approval.
 
 ## Evidence and sessions (`gryphos/session.py`, `gryphos/reporting.py`)
 
-- A `Session` records id, ISO-8601 timestamps, objective, scope snapshot, model,
-  history, proposals, approvals, tool runs, errors, findings, final assessment,
-  and report paths.
-- `SessionStore.save` writes to a temp file and `os.replace`s it (atomic).
-  `list_sessions`/`load` tolerate corrupt files, oversized files, path
-  traversal, and the legacy flat report format. Loading never replays actions or
-  rebuilds approvals.
-- `reporting.generate_reports` writes `<session-id>.json` (session + evidence +
-  report context) and `<session-id>.md` (12 sections). Confirmed observations are
-  derived deterministically from tool output; model findings are labelled
-  interpretations. Untrusted output is fenced with a backtick run longer than any
-  in the content.
+- A `Session` records id, ISO-8601 timezone-aware timestamps, objective, scope
+  snapshot, model, **ordered conversation history**, proposals, **approval
+  decisions**, tool runs, the **full ordered evidence stream** (tool results,
+  rejections, notes, clarifications, final), errors and warnings, findings,
+  final assessment, report paths, and `report_context`.
+- `SessionStore.save` writes to a temp file and `os.replace`s it (atomic) and
+  is **size-bounded**: recorded lists keep at most `MAX_LIST_ITEMS` recent
+  entries, strings are hardened by `MAX_TEXT_CHARS`, and an oversized payload is
+  progressively trimmed (oldest first) before being written — a saved, valid
+  record is preferred over a failed save. `list_sessions`/`load` tolerate
+  corrupt files, oversized files, path traversal, and the legacy flat report
+  format. Loading is strictly read-only: actions are never replayed and
+  historical approvals are restored as inert records, never as an active
+  `ApprovalManager`.
+- **Secrets are redacted before persistence.** `logging_setup.redact` masks
+  OpenRouter keys, bearer/authorization headers, and `api_key=`-style values in
+  *every* string in the session record and in the Markdown report.
+- `reporting.generate_reports` writes `<session-id>.json` (the session record
+  itself, with an embedded `report_context`) and `<session-id>.md` (12
+  sections). Because the JSON is the session record, `SessionStore.save` and
+  report generation produce identical, redacted content and never clobber each
+  other. Confirmed observations are derived deterministically from tool output;
+  model findings are labelled interpretations. Untrusted output is fenced with a
+  backtick run longer than any in the content.
+- `sessions` lists saved sessions; `inspect <id>` shows a read-only summary of
+  a known session (metadata, counts, findings, approvals, errors) without
+  regenerating reports or replaying anything.
+
+## Logs vs evidence
+
+Diagnostics go to `logs/gryphos.log` and assessment evidence to `reports/`
+(both gitignored). The two are separated: session/report files contain only
+redacted assessment evidence and never include debug log lines.
 
 ## Error handling (`gryphos/llm.py`, `gryphos/agent.py`)
 

@@ -28,7 +28,7 @@ log = logging.getLogger("gryphos.cli")
 
 COMMANDS = (
     "help", "models", "model", "scope", "assess", "clear", "status",
-    "sessions", "history", "report", "config", "tools", "exit",
+    "sessions", "inspect", "history", "report", "config", "tools", "exit",
 )
 
 BANNER = """[bold green]═══ GRYPHOS ═══[/bold green]
@@ -115,6 +115,8 @@ def handle_line(state: AppState, line: str) -> bool:
             _cmd_status(state)
         elif command == "sessions":
             _cmd_sessions(state)
+        elif command == "inspect":
+            _cmd_inspect(state, argument)
         elif command == "history":
             _cmd_history(state)
         elif command == "report":
@@ -163,6 +165,7 @@ def _cmd_help(state: AppState) -> None:
         "  assess [text]     Run an assessment (optionally with an objective)\n"
         "  status            Current model, scope, and session info\n"
         "  sessions          List saved sessions\n"
+        "  inspect <id>       Inspect a saved session (read-only, never replays)\n"
         "  history           Show this session's input history\n"
         "  report [id]       Show/regenerate report for a session\n"
         "  config            Show configuration (secrets redacted)\n"
@@ -325,7 +328,63 @@ def _cmd_sessions(state: AppState) -> None:
             str(e.get("target") or "-"),
         )
     state.console.print(table)
-    state.console.print("[dim]Inspect one with: report <session-id>[/dim]")
+    state.console.print("[dim]Inspect one with: inspect <session-id> (read-only).[/dim]")
+
+
+def _cmd_inspect(state: AppState, argument: str) -> None:
+    session_id = argument.strip()
+    if not session_id:
+        state.console.print("[yellow]Usage: inspect <session-id>. See 'sessions' for IDs.[/yellow]")
+        return
+    try:
+        session = state.store.load(session_id)
+    except (FileNotFoundError, ValueError) as exc:
+        state.console.print(f"[red]{exc}[/red]")
+        return
+    state.console.print(Panel(
+        "[bold]Inspection is read-only.[/bold] Nothing from this session is "
+        "replayed and no historical approval is treated as current authorization. "
+        "Use [bold]report <id>[/bold] to regenerate the full report from this "
+        "session record.",
+        title="Gryphos session inspection",
+        border_style="cyan",
+    ))
+    table = Table(title=f"Session {session.session_id}", show_header=False)
+    table.add_column("Key", style="cyan")
+    table.add_column("Value")
+    table.add_row("Created", session.created_at)
+    table.add_row("Completed", session.completed_at or "(in progress)")
+    table.add_row("Model", session.model)
+    table.add_row("Objective", session.objective)
+    table.add_row("Target", session.target or "(none)")
+    table.add_row("Scope", ", ".join(session.scope_snapshot) or "(none)")
+    table.add_row("History entries", str(len(session.history)))
+    table.add_row("Proposals", str(len(session.proposals)))
+    table.add_row("Approval decisions", str(len(session.approvals)))
+    table.add_row("Tool executions", str(len(session.tool_runs)))
+    table.add_row("Findings", str(len(session.findings)))
+    table.add_row("Errors", str(len(session.errors)))
+    table.add_row("Warnings", str(len(session.warnings)))
+    table.add_row("JSON evidence", session.report_json or "(not generated)")
+    table.add_row("Markdown report", session.report_markdown or "(not generated)")
+    state.console.print(table)
+
+    if session.findings:
+        state.console.print("[bold]Findings:[/bold]")
+        for f in session.findings[-10:]:
+            sev = f.get("severity", "?")
+            state.console.print(f"  [yellow]{sev}[/yellow] {f.get('title', '(untitled)')}")
+    if session.approvals:
+        state.console.print("[bold]Approval decisions:[/bold]")
+        for a in session.approvals[-10:]:
+            mark = str(a.get("decision", "?")).upper()
+            state.console.print(
+                f"  [cyan]{mark}[/cyan] {a.get('tool', '?')} on {a.get('target', '?')}"
+            )
+    if session.errors:
+        state.console.print("[bold]Errors:[/bold]")
+        for err in session.errors[-10:]:
+            state.console.print(f"  [red]{err.get('source', '?')}:[/red] {err.get('message', '')}")
 
 
 def _cmd_history(state: AppState) -> None:

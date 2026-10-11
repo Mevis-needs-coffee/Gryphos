@@ -204,3 +204,33 @@ def test_builtin_commands_take_precedence_over_natural_language(state):
     with patch.object(cli, "run_agent") as runner:
         handle_line(state, "scope")
         runner.assert_not_called()
+
+
+def test_inspect_unknown_session_reports_error(state):
+    with patch.object(state.console, "print") as printed:
+        assert handle_line(state, "inspect s-20260101-000000-nope") is True
+    text = " ".join(str(c) for call in printed.call_args_list for c in call[0])
+    assert "No session" in text or "nope" in text
+
+
+def test_inspect_session_is_read_only_and_shows_details(state):
+    from io import StringIO
+
+    from gryphos.session import Session
+    session = Session(session_id=new_session_id(), objective="inspect me",
+                      scope_snapshot=("127.0.0.1/32",), model="m",
+                      target="127.0.0.1")
+    session.record_history("user", "hello")
+    session.findings.append({"title": "something", "severity": "low"})
+    state.store.save(session)
+    buf = StringIO()
+    state.console = Console(file=buf, width=120, force_terminal=False,
+                            color_system=None, legacy_windows=False)
+    assert handle_line(state, f"inspect {session.session_id}") is True
+    text = buf.getvalue()
+    assert session.session_id in text
+    assert "read-only" in text.lower()
+    assert "inspect me" in text
+    assert "something" in text
+    assert "replayed" in text.lower()
+    assert "treat" in text.lower() and "authorization" in text.lower()

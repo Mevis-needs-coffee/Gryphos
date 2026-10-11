@@ -151,3 +151,81 @@ def test_report_paths_recorded(tmp_path):
     session.report_markdown = str(tmp_path / "x.md")
     data = session.to_dict()
     assert data["report_json"].endswith("x.json")
+
+
+def test_secrets_redacted_before_persist(tmp_path):
+    store = SessionStore(tmp_path)
+    key = "sk-or-v1-Abcdef1234567890Deadbeef"
+    session = make_session()
+    session.objective = f"Scan target and store {key}"
+    session.record_history("user", f"Please use {key} for auth")
+    session.record_tool_run({"kind": "tool_result", "tool": "http_headers",
+                             "target": "127.0.0.1", "output": f"Authorization: Bearer {key}"})
+    store.save(session)
+
+    raw = (tmp_path / f"{session.session_id}.json").read_text(encoding="utf-8")
+    assert key not in raw
+    assert "***REDACTED***" in raw
+
+    loaded = store.load(session.session_id)
+    assert key not in json.dumps(loaded.to_dict())
+    assert "***REDACTED***" in loaded.history[0]["content"]
+
+
+def test_report_context_roundtrip(tmp_path):
+    store = SessionStore(tmp_path)
+    session = make_session()
+    session.report_context = {"tools_executed": ["nmap_basic"], "contradictions": []}
+    store.save(session)
+    loaded = store.load(session.session_id)
+    assert loaded.report_context == {"tools_executed": ["nmap_basic"], "contradictions": []}
+
+
+def test_evidence_stream_roundtrip_preserves_order(tmp_path):
+    store = SessionStore(tmp_path)
+    session = make_session()
+    for item in [
+        {"kind": "tool_call", "tool": "nmap_basic", "step": 1},
+        {"kind": "tool_result", "tool": "nmap_basic", "output": "closed"},
+        {"kind": "approval_refused", "tool": "nmap_basic"},
+        {"kind": "final", "message": "done"},
+    ]:
+        session.record_evidence(item)
+    store.save(session)
+    loaded = store.load(session.session_id)
+    kinds = [e["kind"] for e in loaded.evidence]
+    assert kinds == ["tool_call", "tool_result", "approval_refused", "final"]
+    assert loaded.tool_runs[0]["tool"] == "nmap_basic"
+
+
+def test_warnings_roundtrip(tmp_path):
+    store = SessionStore(tmp_path)
+    session = make_session()
+    session.warnings.append("partial result")
+    store.save(session)
+    assert store.load(session.session_id).warnings == ["partial result"]
+
+
+def test_save_trims_oldest_records_when_oversized(tmp_path, monkeypatch):
+    import gryphos.session as sess_mod
+    monkeypatch.setattr(sess_mod, "MAX_SESSION_FILE_BYTES", 1500)
+    store = SessionStore(tmp_path)
+    session = make_session()
+    for i in range(40):
+        session.record_history("user", f"step {i} " + "x" * 100)
+    store.save(session)
+    loaded = store.load(session.session_id)
+    assert 0 < len(loaded.history) < 40
+    assert loaded.history[-1]["content"] == "step 39 " + "x" * 100
+
+
+def test_long_strings_truncated_on_persist(tmp_path, monkeypatch):
+    import gryphos.session as sess_mod
+    monkeypatch.setattr(sess_mod, "MAX_TEXT_CHARS", 40)
+    store = SessionStore(tmp_path)
+    session = make_session()
+    session.final_assessment = "z" * 300
+    store.save(session)
+    loaded = store.load(session.session_id)
+    assert len(loaded.final_assessment) < 60
+    assert loaded.final_assessment.endswith("…[truncated]")

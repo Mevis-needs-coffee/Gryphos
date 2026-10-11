@@ -10,7 +10,7 @@ from gryphos.reporting import (
     generate_reports,
     render_markdown,
 )
-from gryphos.session import Session, new_session_id
+from gryphos.session import Session, SessionStore, new_session_id
 
 
 def test_reports_contain_actual_evidence(sample_session, tmp_path):
@@ -22,6 +22,32 @@ def test_reports_contain_actual_evidence(sample_session, tmp_path):
     assert "100 closed" in md or "closed tcp ports" in md
     assert data["tool_runs"][0]["output"]
     assert "Nmap done" in data["tool_runs"][0]["output"]
+
+
+def test_report_json_matches_stored_session_and_keeps_context(sample_session, tmp_path):
+    store = SessionStore(tmp_path / "sessions")
+    json_path, _ = generate_reports(sample_session, tmp_path / "reports")
+    report_data = json.loads(json_path.read_text(encoding="utf-8"))
+    assert "report_context" in report_data
+    assert report_data["report_context"]["tools_executed"] == ["nmap_basic"]
+
+    # The session store writes to its own directory; the stored record must keep
+    # the report context (no clobbering) and remain the same redacted content.
+    store.save(sample_session)
+    stored = store.load(sample_session.session_id)
+    assert stored.report_context is not None
+    assert stored.report_json == str(json_path)
+    assert json.loads(sample_session.to_dict()["report_context"] and
+                      json.dumps(sample_session.report_context))["tools_executed"] == ["nmap_basic"]
+
+
+def test_report_json_redacts_secrets(sample_session, tmp_path):
+    key = "sk-or-v1-Zyxw9876543210Secret"
+    sample_session.tool_runs[0]["output"] = sample_session.tool_runs[0]["output"] + "\n" + key
+    sample_session.findings.append({"title": f"Leak {key}", "severity": "low"})
+    json_path, md_path = generate_reports(sample_session, tmp_path)
+    assert key not in json_path.read_text(encoding="utf-8")
+    assert key not in md_path.read_text(encoding="utf-8")
 
 
 def test_markdown_has_required_sections(sample_session):

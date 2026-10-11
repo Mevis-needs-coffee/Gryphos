@@ -225,6 +225,7 @@ python main.py start
 | `assess [text]` | Run an assessment, optionally with an objective. |
 | `status` | Show current model, scope, tools, and session info. |
 | `sessions` | List saved sessions. |
+| `inspect <id>` | Inspect a saved session (read-only; never replays actions or approvals). |
 | `history` | Show this session's input history. |
 | `report [id]` | Regenerate a report for the current or named session. |
 | `config` | Show configuration (secrets redacted). |
@@ -268,10 +269,32 @@ evidence; nothing is executed. The model cannot approve itself.
 
 Each completed assessment writes two files into `reports/`:
 
-- `<session-id>.json` — machine-readable session + evidence.
+- `<session-id>.json` — the full, self-contained session record: id,
+  timezone-aware timestamps, objective, model, scope snapshot, ordered
+  conversation history, tool proposals, approval decisions, executed actions
+  with their actual output, the ordered evidence stream, parsed data, findings,
+  errors/warnings, final analysis, report paths, and a `report_context` block.
 - `<session-id>.md` — human-readable report (executive summary, metadata, scope,
   methodology, tools executed, approvals, confirmed observations, model findings
   with severity/confidence, remediation, limitations, errors, timestamps).
+
+Session persistence is designed for reliability and safety:
+
+- **Writes are atomic** (temp file + `os.replace`). Corrupt, partial, or
+  oversized files are skipped safely when listing and reported cleanly when
+  loading.
+- **Size limits are applied on save** — recorded lists keep the most-recent
+  entries and oversized records are trimmed oldest-first rather than lost.
+- **Secrets are redacted** before anything is written (OpenRouter keys,
+  bearer/authorization headers, `api_key=`-style values), in both JSON and
+  Markdown.
+- **Debug logs and evidence are separated**: diagnostics go to `logs/`
+  (gitignored), assessment evidence to `reports/` (gitignored); session files
+  never contain log lines.
+- **Loading is read-only.** Nothing is ever replayed and no historical approval
+  is treated as current authorization — every new assessment requires fresh
+  fingerprints and explicit approval. Use `sessions` to list and `inspect <id>`
+  to examine a previous session.
 
 `reports/` is gitignored so local evidence is not committed. Confirmed
 observations are derived deterministically from tool output; model findings are
@@ -338,7 +361,8 @@ ruff check gryphos/ main.py tests/
   re-validated.
 - No `shell=True`; all external tools use fixed argument lists with timeouts and
   output limits.
-- Secrets are redacted from logs; API keys are never printed or written to reports.
+- Secrets are redacted from logs and from persisted sessions/reports; API keys
+  are never printed or written to disk.
 - See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for trust boundaries.
 
 Use Gryphos only where you are authorized. You are responsible for complying with

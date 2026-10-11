@@ -406,4 +406,7 @@ def run_agent(
     )
     session.record_history("user", objective)
     outcome = agent.run(objective, target)
+    # Persist the full ordered evidence stream (tool runs, rejections, notes,
+    # clarifications, and the final decision) alongside the structured records.
+    session.evidence = list(agent.evidence)
     return outcome
