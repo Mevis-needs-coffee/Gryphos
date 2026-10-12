@@ -47,6 +47,11 @@ arbitrary shell commands and will not scan anything outside your scope.
   escaped before rendering, an absence of open ports is never called "secure",
   no CVE identifiers are asserted, and every finding is labelled an unverified
   hypothesis distinct from observed facts.
+- **Bounded autonomous CTF solving** (`solve <id>`): a persistent task plan, a
+  confined read-only file tool, hypotheses/evidence recording, duplicate-action
+  and duplicate-flag prevention, step/time/tool budgets, and a flag verifier. A
+  challenge is only reported solved when a flag is actually verified — a
+  detected-but-unverified string is never success.
 
 ## Registered tools
 
@@ -184,8 +189,12 @@ GRYPHOS_ALLOWED_TARGETS=127.0.0.1/32
   without written authorization.
 - Numeric safety limits (`GRYPHOS_COMMAND_TIMEOUT`, `GRYPHOS_MAX_OUTPUT_CHARS`,
   `GRYPHOS_MAX_AGENT_STEPS`, `GRYPHOS_REQUEST_TIMEOUT`, `GRYPHOS_MAX_RETRIES`,
-  `GRYPHOS_TIME_BUDGET_SECONDS`, `GRYPHOS_MODEL_CACHE_TTL`) are clamped to safe
-  ranges; invalid values fall back to defaults with a log warning.
+  `GRYPHOS_TIME_BUDGET_SECONDS`, `GRYPHOS_MODEL_CACHE_TTL`, `GRYPHOS_CTF_MAX_STEPS`)
+  are clamped to safe ranges; invalid values fall back to defaults with a log warning.
+- CTF solver settings: `GRYPHOS_CTF_CHALLENGES_DIR` (default `challenges`),
+  `GRYPHOS_CTF_MAX_STEPS` (1-100, default 20), and `GRYPHOS_CTF_REMOTE_VERIFY`
+  (default `false`). Remote flag submission only works for challenges that declare
+  a `submit` block and is off unless you explicitly enable it.
 
 ### OpenRouter API key
 
@@ -232,6 +241,7 @@ python main.py start
 | `scope set <ip[,ip...]>` | Change scope; expansion beyond the baseline needs the `EXPAND-SCOPE` token. |
 | `scope reset` | Restore the effective scope to the configured baseline. |
 | `assess [text]` | Run an assessment, optionally with an objective. |
+| `solve [id]` | Solve an explicitly configured CTF challenge; with no id, list challenges. |
 | `status` | Show current model, scope, tools, and session info. |
 | `sessions` | List saved sessions. |
 | `inspect <id>` | Inspect a saved session (read-only; never replays actions or approvals). |
@@ -273,6 +283,44 @@ side effects, timeout, and output limit; the default answer is **No**. Approval 
 bound to that exact action — if the target or any security-relevant argument
 changes, a new approval is required. Declining asks the model to use its existing
 evidence; nothing is executed. The model cannot approve itself.
+
+## Solving CTF challenges
+
+Gryphos can also run a bounded, autonomous solver for **explicitly configured,
+self-contained** challenges. Each challenge is a directory:
+
+```
+challenges/<id>/challenge.json
+challenges/<id>/<provided files...>
+```
+
+```bash
+gryphos solve                 # list configured challenges
+gryphos solve example-warmup  # solve one
+```
+
+See [`challenges/README.md`](challenges/README.md) for the `challenge.json`
+format (id, one of 9 categories, description, task, optional `flag_format`
+regex, optional CTFd-style `submit` block, provided files).
+
+How the solver stays honest and bounded:
+
+- **Confined tools only.** The solver can read files *inside* the challenge
+  directory (`challenge_file`) and summarize its own evidence. Path traversal,
+  absolute paths, and symlink escapes are rejected; no shell and no network
+  activity by the solver itself.
+- **A persistent task plan** (pending/running/completed/failed/blocked) is seeded
+  from the category, updated every step, and saved with the session and report.
+- **Duplicate-action and duplicate-flag prevention** via canonical fingerprints,
+  plus step, wall-clock, per-tool timeout/output, and consecutive-failure bounds.
+- **Verified flags only.** A flag is reported as **solved** only when a verifier
+  accepts it. Detection (a `flag{...}`-shaped string in a file) is recorded as an
+  **unverified** candidate, never as success. The default verifier is offline and
+  only checks format conformance (the report says so); an opt-in CTFd-style HTTP
+  verifier is used only for challenges that declare a `submit` block *and* when
+  `GRYPHOS_CTF_REMOTE_VERIFY=true`.
+- **Untrusted data.** Provided file contents are treated as data, never as
+  instructions.
 
 ## Reports and sessions
 
@@ -354,6 +402,10 @@ ruff check gryphos/ main.py tests/
 - Free-tier models may be unavailable, rate-limited, or unable to follow the
   required JSON format; select a different model when prompted.
 - No exploitation, credential testing, evasion, or persistence.
+- CTF solving is limited to explicitly configured, local challenge directories;
+  it never scans networks, never runs shell commands, and only reads files inside
+  the challenge directory. A format-matching flag is not independently confirmed
+  unless a submit endpoint (opt-in) accepts it.
 - Reports can contain sensitive host information — sanitize before sharing.
 
 ## Security design and responsible use

@@ -1,0 +1,9 @@
+{
+  "id": "example-warmup",
+  "name": "Example Warmup",
+  "category": "misc",
+  "description": "A toy challenge that demonstrates the challenge format. The provided notes file contains a decoy flag string and a base64-encoded hint.",
+  "task": "Inspect the provided file and recover the flag.",
+  "flag_format": "flag\\{[^}]{1,80}\\}",
+  "files": ["notes.txt"]
+}

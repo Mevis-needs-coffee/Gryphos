@@ -30,6 +30,7 @@ _INT_SETTINGS: dict[str, tuple[int, int, int]] = {
     "GRYPHOS_TIME_BUDGET_SECONDS": (600, 30, 3600),
     "GRYPHOS_MODEL_CACHE_TTL": (300, 0, 86400),
     "GRYPHOS_MAX_APPROVAL_LEVEL": (3, 0, 4),
+    "GRYPHOS_CTF_MAX_STEPS": (20, 1, 100),
 }
 
 
@@ -54,6 +55,19 @@ def _int_env(name: str) -> int:
     return value
 
 
+def _bool_env(name: str) -> bool:
+    """Parse a truthy/falsey env flag; unknown values default to False."""
+    raw = (os.getenv(name) or "").strip().lower()
+    if not raw:
+        return False
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    log.warning("Ignoring invalid %s=%r; treating as false", name, raw)
+    return False
+
+
 @dataclass(frozen=True)
 class Settings:
     api_key: str
@@ -70,6 +84,9 @@ class Settings:
     max_approval_level: int = 3
     reports_dir: Path = field(default_factory=lambda: Path("reports"))
     log_dir: Path = field(default_factory=lambda: Path("logs"))
+    ctf_challenges_dir: Path = field(default_factory=lambda: Path("challenges"))
+    ctf_max_steps: int = 20
+    ctf_remote_verify: bool = False
 
     @property
     def api_key_configured(self) -> bool:
@@ -100,6 +117,9 @@ class Settings:
             "model_cache_ttl": self.model_cache_ttl,
             "max_approval_level": self.max_approval_level,
             "reports_dir": str(self.reports_dir),
+            "ctf_challenges_dir": str(self.ctf_challenges_dir),
+            "ctf_max_steps": self.ctf_max_steps,
+            "ctf_remote_verify": self.ctf_remote_verify,
         }
 
 
@@ -127,4 +147,9 @@ def get_settings() -> Settings:
         time_budget_seconds=_int_env("GRYPHOS_TIME_BUDGET_SECONDS"),
         model_cache_ttl=_int_env("GRYPHOS_MODEL_CACHE_TTL"),
         max_approval_level=_int_env("GRYPHOS_MAX_APPROVAL_LEVEL"),
+        ctf_challenges_dir=Path(
+            os.getenv("GRYPHOS_CTF_CHALLENGES_DIR", "challenges").strip() or "challenges"
+        ),
+        ctf_max_steps=_int_env("GRYPHOS_CTF_MAX_STEPS"),
+        ctf_remote_verify=_bool_env("GRYPHOS_CTF_REMOTE_VERIFY"),
     )

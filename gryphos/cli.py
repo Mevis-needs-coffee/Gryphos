@@ -17,6 +17,8 @@ from rich.table import Table
 
 from .agent import run_agent
 from .config import ConfigError, Settings, get_settings
+from .ctf import ChallengeError, discover_challenges, load_challenge, run_solver
+from .ctf.report import generate_ctf_report
 from .llm import GryphosLLM, LLMError
 from .logging_setup import setup_logging
 from .reporting import generate_reports
@@ -27,7 +29,7 @@ from .tools import build_registry
 log = logging.getLogger("gryphos.cli")
 
 COMMANDS = (
-    "help", "models", "model", "scope", "assess", "clear", "status",
+    "help", "models", "model", "scope", "assess", "solve", "clear", "status",
     "sessions", "inspect", "history", "report", "config", "tools", "exit",
 )
 
@@ -109,6 +111,8 @@ def handle_line(state: AppState, line: str) -> bool:
             _cmd_scope(state, argument)
         elif command == "assess":
             _cmd_assess(state, argument)
+        elif command == "solve":
+            _cmd_solve(state, argument)
         elif command == "clear":
             _cmd_clear(state)
         elif command == "status":
@@ -163,6 +167,7 @@ def _cmd_help(state: AppState) -> None:
         "  model <exact-id>  Select a model by exact OpenRouter ID\n"
         "  scope             Show the authorized scope (see also: scope set|narrow|reset)\n"
         "  assess [text]     Run an assessment (optionally with an objective)\n"
+        "  solve [id]        Solve a configured CTF challenge (list challenges if no id)\n"
         "  status            Current model, scope, and session info\n"
         "  sessions          List saved sessions\n"
         "  inspect <id>       Inspect a saved session (read-only, never replays)\n"
@@ -517,6 +522,71 @@ def _run_assessment(state: AppState, objective: str, target: str | None, interac
     state.last_session = session
     if target:
         state.last_target = target
+
+
+def _cmd_solve(state: AppState, argument: str) -> None:
+    settings = state.settings
+    challenge_id = argument.strip()
+    if not challenge_id:
+        entries = discover_challenges(settings.ctf_challenges_dir)
+        if not entries:
+            state.console.print(
+                f"[yellow]No challenges found in {settings.ctf_challenges_dir}. "
+                "Add challenges/<id>/challenge.json.[/yellow]"
+            )
+            return
+        table = Table(title=f"CTF challenges ({len(entries)})")
+        table.add_column("ID", style="cyan")
+        table.add_column("Name")
+        table.add_column("Category")
+        for e in entries:
+            table.add_row(str(e.get("id", "?")), str(e.get("name", "?")), str(e.get("category", "?")))
+        state.console.print(table)
+        state.console.print("[dim]Solve one with: solve <id>[/dim]")
+        return
+
+    if not settings.api_key_configured:
+        raise ConfigError(
+            "OPENROUTER_API_KEY is not configured. Copy .env.example to .env and set your key."
+        )
+    try:
+        challenge = load_challenge(settings.ctf_challenges_dir, challenge_id)
+    except ChallengeError as exc:
+        state.console.print(f"[red]Challenge error:[/red] {exc}")
+        return
+
+    session = Session(
+        session_id=new_session_id(),
+        objective=f"[ctf] {challenge.name}",
+        scope_snapshot=(),
+        model=state.llm.model,
+        target=None,
+    )
+
+    def ask(question: str) -> str:
+        return state.console.input(f"[cyan]Solver needs input:[/cyan] {question} ")
+
+    outcome = run_solver(
+        state.llm, settings, challenge,
+        session=session, console=state.console, ask_user=ask,
+    )
+    session.record_history("assistant", outcome.message or f"(status: {outcome.status})")
+    session.complete()
+    try:
+        json_path, md_path = generate_ctf_report(session, outcome.to_dict(), settings.reports_dir)
+        state.console.print(f"[dim]Saved JSON evidence: {json_path}[/dim]")
+        state.console.print(f"[dim]Saved Markdown report: {md_path}[/dim]")
+    except OSError as exc:
+        session.record_error("reporting", f"Could not write reports: {exc}")
+        state.console.print(f"[red]Could not write reports:[/red] {exc}")
+    try:
+        state.store.save(session)
+    except OSError as exc:
+        state.console.print(f"[red]Could not save session:[/red] {exc}")
+    state.last_session = session
+    verdict = "SOLVED" if outcome.solved else "UNSOLVED"
+    style = "green" if outcome.solved else "yellow"
+    state.console.print(f"[{style}]{verdict}[/{style}] — {challenge.name} ({challenge.category})")
 
 
 def run_repl(settings: Settings | None = None, console: Console | None = None) -> None:

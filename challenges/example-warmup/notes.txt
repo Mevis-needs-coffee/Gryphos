@@ -1,0 +1,11 @@
+Warmup notes
+============
+
+This is a self-contained, offline example challenge for Gryphos' solver mode.
+
+- The real flag is base64-encoded below; decode it to recover it.
+- The other brace-delimited string is a decoy and will not verify.
+
+encoded: ZmxhZ3tleGFtcGxlX3dhcm11cF9zb2x2ZWR9
+
+decoy: flag{this_is_not_the_flag}

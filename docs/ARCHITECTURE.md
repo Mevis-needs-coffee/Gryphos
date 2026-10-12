@@ -21,6 +21,7 @@ of evidence.
 | `gryphos/analysis.py` | Offline evidence analysis (Tool 10): normalization, cross-tool correlation, contradiction detection, session comparison, and the passive `summarize_evidence` tool. |
 | `gryphos/session.py` | Session records and atomic JSON persistence: full evidence stream, legacy + corrupt-file tolerance, size limits, secret redaction. |
 | `gryphos/reporting.py` | Markdown report + JSON evidence generation (includes correlation and contradiction sections). |
+| `gryphos/ctf/` | Autonomous CTF solving: `models.py` (challenge/flag/hypothesis records), `loader.py` (challenge discovery), `planner.py` (persistent task plan), `flag.py` (detection + gated verification), `tools.py` (confined `challenge_file` + evidence lens), `solver.py` (bounded loop), `report.py` (CTF report). |
 
 ## Trust boundaries
 
@@ -101,14 +102,19 @@ Bounds and safety rules:
 
 ## Decision schema (`gryphos/models.py`)
 
-Four shapes, validated with Pydantic:
+Six shapes, validated with Pydantic:
 
 ```jsonc
-{"kind":"tool_call","tool":"nmap_basic","args":{"target":"127.0.0.1"},"reason":"..."}
+{"kind":"tool_call","tool":"nmap_basic","args":{"target":"127.0.0.1"},"reason":"..."}  // optional "hypothesis" (CTF)
 {"kind":"final","message":"...","findings":[{"title":"...","severity":"low","confidence":"high","detail":"...","remediation":"..."}]}
 {"kind":"clarification","question":"..."}
 {"kind":"error","message":"..."}
+{"kind":"flag","flag":"flag{...}","source":"where it was observed","confidence":"low|medium|high"}  // CTF solver only
+{"kind":"replan","tasks":["next task", "..."],"reason":"why the plan changed"}                       // CTF solver only
 ```
+
+The assessment agent acts on `tool_call`/`final`/`clarification`/`error` and
+safely ignores the CTF-only kinds.
 
 The parser (`parse_decision`) accepts plain JSON, JSON in Markdown fences, or a
 JSON object embedded in prose. Malformed output, non-object payloads, unknown
@@ -285,6 +291,63 @@ therefore requires fresh approval. Model output cannot manufacture approval.
 - `sessions` lists saved sessions; `inspect <id>` shows a read-only summary of
   a known session (metadata, counts, findings, approvals, errors) without
   regenerating reports or replaying anything.
+
+## CTF solver (`gryphos/ctf/`)
+
+A second bounded loop for a different objective: solve one explicitly configured
+CTF challenge. It reuses the same trust boundaries (untrusted model, controller
+validation, execution-time confinement) with a deliberately minimal tool surface.
+
+```
+load challenge (challenges/<id>/challenge.json)
+plan = build_initial_plan(challenge)
+loop up to ctf_max_steps and within time_budget:
+    digest = summarize_evidence(evidence)          # offline
+    decision = llm.decide(objective, evidence, digest, plan, custom CTF prompt)
+    ├─ tool_call  → registry-only, argument-validated, fingerprint-deduped
+    │                challenge_file is confined to the challenge root
+    │                output is scanned for flag-shaped strings (recorded UNVERIFIED)
+    ├─ flag       → verifier decides; only "verified" ends the run as SOLVED
+    ├─ final      → conclude (solved only if a flag was verified earlier)
+    ├─ clarification → prompt if interactive, else stop UNSOLVED
+    └─ error      → stop FAILED
+    if consecutive_failures ≥ 3 → abort
+after loop → steps_exhausted / time_budget (honest report)
+```
+
+- **Challenge model** (`models.py`): id, name, one of 9 categories, description,
+  task, root, optional flag-format regex, optional CTFd-style submit config,
+  provided files, and a status lifecycle.
+- **Task plan** (`planner.py`): ordered `TaskItem`s with statuses
+  `pending`/`running`/`completed`/`failed`/`blocked`, seeded deterministically
+  from the category, with a `replan` that blocks superseded open work. The model
+  can trigger a replan (a `replan` decision) and state working hypotheses on tool
+  calls; both are recorded as evidence. Persisted on the session and rendered in
+  the report.
+- **Flag detection/verification** (`flag.py`): detection scans untrusted output
+  for flag-shaped strings; the default `HeuristicFlagVerifier` accepts a
+  candidate only when it matches the declared/default format and marks the
+  verdict **not independently confirmed**. `HttpFlagVerifier` (CTFd-style) is
+  only constructed when a challenge declares a `submit` block **and**
+  `GRYPHOS_CTF_REMOTE_VERIFY` is enabled. A candidate is only "verified" when a
+  verifier accepts it — detection alone is never success.
+- **Tool surface** (`tools.py`): `challenge_file` reads/lists files *inside* the
+  challenge directory (path resolved and required to stay within the root;
+  traversal, absolute paths, and symlink escapes rejected; bounded output; size
+  and SHA-256 recorded) and the offline `summarize_evidence` lens. This registry
+  is separate from the assessment registry.
+- **Bounds and safety**: step limit (`GRYPHOS_CTF_MAX_STEPS`, default 20),
+  wall-clock budget (reuses `GRYPHOS_TIME_BUDGET_SECONDS`), per-tool timeout and
+  output bounds, canonical-fingerprint anti-repetition for both actions and flag
+  candidates, a consecutive-failure abort, and bounded transient-LLM resume. File
+  contents are untrusted data, never instructions; the solver never runs shell
+  commands and makes no network activity by itself.
+- **Session + report**: the session gains optional `challenge`, `solve_plan`, and
+  `flag_candidates` fields (backward-compatible load). The CTF report
+  (`report.py`) lists the challenge, plan, hypotheses, evidence, candidates with
+  verification status, and states plainly when a flag was not verified. The
+  `solve` CLI command loads a challenge, runs the solver, writes the report, and
+  persists the session; `solve` with no id lists available challenges.
 
 ## Logs vs evidence
 

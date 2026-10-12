@@ -1,8 +1,9 @@
 """Structured agent decision schemas and the strict response parser.
 
 Every model response is parsed into exactly one of these decision kinds:
-`tool_call`, `final`, `clarification`, `error`. Malformed output is rejected
-safely — it is never interpreted as a command.
+`tool_call`, `final`, `clarification`, `error`, `flag` (CTF solving), or
+`replan` (CTF solving). Malformed output is rejected safely — it is never
+interpreted as a command.
 """
 
 from __future__ import annotations
@@ -43,8 +44,9 @@ class ToolCallDecision(BaseModel):
     tool: str = Field(min_length=1, max_length=64)
     args: dict[str, object] = Field(default_factory=dict)
     reason: str = Field(default="", max_length=2000)
+    hypothesis: str = Field(default="", max_length=500)  # optional working theory (CTF solver)
 
-    @field_validator("reason", mode="before")
+    @field_validator("reason", "hypothesis", mode="before")
     @classmethod
     def _strip(cls, v: object) -> object:
         return v.strip() if isinstance(v, str) else v
@@ -81,7 +83,60 @@ class ErrorDecision(BaseModel):
         return v.strip() if isinstance(v, str) else v
 
 
-AgentDecision = ToolCallDecision | FinalDecision | ClarificationDecision | ErrorDecision
+class FlagDecision(BaseModel):
+    """A proposed flag candidate (CTF solving only).
+
+    The value is only ever a *candidate*: the controller records it and the flag
+    verifier decides whether it can be trusted. A proposal is never success.
+    """
+
+    kind: Literal["flag"]
+    flag: str = Field(min_length=1, max_length=512)
+    source: str = Field(default="", max_length=500)
+    confidence: Literal["low", "medium", "high"] = "medium"
+
+    @field_validator("flag", "source", mode="before")
+    @classmethod
+    def _strip(cls, v: object) -> object:
+        return v.strip() if isinstance(v, str) else v
+
+
+class ReplanDecision(BaseModel):
+    """A request to replace the remaining task plan (CTF solving only).
+
+    The controller rebuilds the open portion of the plan from these task
+    descriptions; superseded open tasks are marked blocked. An empty list is
+    rejected so a replan always makes progress.
+    """
+
+    kind: Literal["replan"]
+    tasks: list[str] = Field(min_length=1, max_length=20)
+    reason: str = Field(default="", max_length=2000)
+
+    @field_validator("tasks", mode="before")
+    @classmethod
+    def _strip_tasks(cls, v: object) -> object:
+        if isinstance(v, list):
+            cleaned = [item.strip() if isinstance(item, str) else item for item in v]
+            if any(c == "" for c in cleaned):
+                raise ValueError("replan tasks must be non-empty")
+            return cleaned
+        return v
+
+    @field_validator("reason", mode="before")
+    @classmethod
+    def _strip(cls, v: object) -> object:
+        return v.strip() if isinstance(v, str) else v
+
+
+AgentDecision = (
+    ToolCallDecision
+    | FinalDecision
+    | ClarificationDecision
+    | ErrorDecision
+    | FlagDecision
+    | ReplanDecision
+)
 
 _FENCE_RE = re.compile(r"^\s*```(?:json)?\s*\n?(.*?)\n?\s*```\s*$", re.DOTALL | re.IGNORECASE)
 
@@ -131,9 +186,10 @@ def parse_decision(content: str) -> AgentDecision:
     if not isinstance(value, dict):
         raise DecisionParseError("Model response must be a single JSON object.", raw=raw)
     kind = value.get("kind")
-    if kind not in {"tool_call", "final", "clarification", "error"}:
+    if kind not in {"tool_call", "final", "clarification", "error", "flag", "replan"}:
         raise DecisionParseError(
-            f"Unknown decision kind {kind!r}; expected tool_call, final, clarification, or error.",
+            f"Unknown decision kind {kind!r}; expected tool_call, final, "
+            "clarification, error, flag, or replan.",
             raw=raw,
         )
     try:
@@ -143,6 +199,10 @@ def parse_decision(content: str) -> AgentDecision:
             return FinalDecision.model_validate(value)
         if kind == "clarification":
             return ClarificationDecision.model_validate(value)
+        if kind == "flag":
+            return FlagDecision.model_validate(value)
+        if kind == "replan":
+            return ReplanDecision.model_validate(value)
         return ErrorDecision.model_validate(value)
     except ValidationError as exc:
         problems = "; ".join(

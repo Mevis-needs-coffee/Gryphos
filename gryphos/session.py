@@ -35,6 +35,7 @@ _SESSION_ID_RE = re.compile(r"^s-\d{8}-\d{6}-[0-9a-f]{8}$")
 # Recorded lists that are trimmed (oldest first) when a session is too large.
 _RECORD_LISTS = (
     "history", "evidence", "tool_runs", "proposals", "approvals", "errors", "findings",
+    "flag_candidates",
 )
 
 
@@ -94,6 +95,10 @@ class Session:
     report_json: str | None = None
     report_markdown: str | None = None
     report_context: dict | None = None
+    # Optional CTF solve fields (populated only by the solver; None elsewhere).
+    challenge: dict | None = None
+    solve_plan: dict | None = None
+    flag_candidates: list[dict] = field(default_factory=list)
 
     def record_history(self, role: str, content: str) -> None:
         self.history.append({"role": role, "content": content, "at": utc_now_iso()})
@@ -122,6 +127,7 @@ class Session:
             "errors": self.errors[-MAX_LIST_ITEMS:],
             "warnings": self.warnings[-MAX_LIST_ITEMS:],
             "findings": self.findings[-MAX_LIST_ITEMS:],
+            "flag_candidates": self.flag_candidates[-MAX_LIST_ITEMS:],
         }
 
     def to_dict(self) -> dict:
@@ -139,6 +145,8 @@ class Session:
             "report_json": self.report_json,
             "report_markdown": self.report_markdown,
             "report_context": self.report_context,
+            "challenge": self.challenge,
+            "solve_plan": self.solve_plan,
         }
         # Redact secrets and bound string lengths before anything is written.
         return _sanitize(payload)
@@ -192,6 +200,9 @@ class Session:
             report_json=data.get("report_json"),
             report_markdown=data.get("report_markdown"),
             report_context=data.get("report_context"),
+            challenge=data.get("challenge"),
+            solve_plan=data.get("solve_plan"),
+            flag_candidates=data.get("flag_candidates") or [],
         )
 
 
