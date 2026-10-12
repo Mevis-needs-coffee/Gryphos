@@ -148,6 +148,21 @@ class TaskPlan:
         return plan
 
 
+# Category-specific tool strategies seeded into the initial plan. These are
+# suggestions, not constraints: the solver may replan at any time.
+_CATEGORY_TASKS: dict[str, tuple[str, ...]] = {
+    "misc": ("Triage with file_identify, then follow up with encoding_decode or archive_inspect.",),
+    "encoding": ("Run encoding_decode on the primary artifact and walk the decode chain.",),
+    "crypto": ("Run crypto_analyze (frequency/caesar/xor/vigenere/jwt/rsa) and rank candidates.",),
+    "forensics": ("Use file_identify and archive_inspect on each artifact; pursue embedded data.",),
+    "stego": ("Use image_triage and artifact_extract to find appended or embedded payloads.",),
+    "web": ("Inspect provided source/config with challenge_file and document_parse.",),
+    "network": ("Run pcap_summary to enumerate protocols, conversations, DNS, and payload strings.",),
+    "reverse_engineering": ("Identify the binary with file_identify and extract strings/structure.",),
+    "binary_exploitation": ("Identify the artifact and its embedded strings before deeper analysis.",),
+}
+
+
 def build_initial_plan(challenge: Challenge) -> TaskPlan:
     """Deterministic first plan derived from the challenge's declared category."""
     plan = TaskPlan()
@@ -159,6 +174,8 @@ def build_initial_plan(challenge: Challenge) -> TaskPlan:
         CATEGORY_GUIDANCE.get(challenge.category, "Analyze the artifact for the intended solution."),
         f"Category '{challenge.category}' determines the likely attack.",
     )
+    for suggestion in _CATEGORY_TASKS.get(challenge.category, ()):
+        plan.add(suggestion, f"Category '{challenge.category}' tool strategy.")
     plan.add(
         "Analyze the most promising artifact and record concrete observations.",
         "Observations, not guesses, drive the solution.",

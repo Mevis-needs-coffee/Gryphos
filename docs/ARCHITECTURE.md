@@ -21,7 +21,7 @@ of evidence.
 | `gryphos/analysis.py` | Offline evidence analysis (Tool 10): normalization, cross-tool correlation, contradiction detection, session comparison, and the passive `summarize_evidence` tool. |
 | `gryphos/session.py` | Session records and atomic JSON persistence: full evidence stream, legacy + corrupt-file tolerance, size limits, secret redaction. |
 | `gryphos/reporting.py` | Markdown report + JSON evidence generation (includes correlation and contradiction sections). |
-| `gryphos/ctf/` | Autonomous CTF solving: `models.py` (challenge/flag/hypothesis records), `loader.py` (challenge discovery), `planner.py` (persistent task plan), `flag.py` (detection + gated verification), `tools.py` (confined `challenge_file` + evidence lens), `solver.py` (bounded loop), `report.py` (CTF report). |
+| `gryphos/ctf/` | Autonomous CTF solving: `models.py` (challenge/flag/hypothesis records), `loader.py` (challenge discovery), `planner.py` (persistent task plan), `flag.py` (detection + gated verification), `sandbox.py` (path confinement + bounded reads), `deps.py` (optional-capability discovery), `filetools.py`/`encoding.py`/`archives.py`/`images.py`/`pcap.py`/`documents.py`/`crypto.py` (offline analysis tools), `tools.py` (solver registry), `solver.py` (bounded loop), `report.py` (CTF report). |
 
 ## Trust boundaries
 
@@ -334,14 +334,24 @@ after loop → steps_exhausted / time_budget (honest report)
 - **Tool surface** (`tools.py`): `challenge_file` reads/lists files *inside* the
   challenge directory (path resolved and required to stay within the root;
   traversal, absolute paths, and symlink escapes rejected; bounded output; size
-  and SHA-256 recorded) and the offline `summarize_evidence` lens. This registry
-  is separate from the assessment registry.
+  and SHA-256 recorded), plus the offline `summarize_evidence` lens and a set of
+  read-only analysis tools — `file_identify`, `encoding_decode`, `archive_inspect`,
+  `image_triage`, `pcap_summary`, `document_parse`, `crypto_analyze`,
+  `artifact_extract`, and `list_capabilities`. This registry is separate from the
+  assessment registry. Path confinement and bounded reads live in
+  `ctf/sandbox.py`; optional-capability discovery lives in `ctf/deps.py`. When a
+  challenge declares a `flag_format`, it is compiled once and baked into every
+  tool so flag-shaped strings surface in the structured evidence.
 - **Bounds and safety**: step limit (`GRYPHOS_CTF_MAX_STEPS`, default 20),
   wall-clock budget (reuses `GRYPHOS_TIME_BUDGET_SECONDS`), per-tool timeout and
   output bounds, canonical-fingerprint anti-repetition for both actions and flag
   candidates, a consecutive-failure abort, and bounded transient-LLM resume. File
   contents are untrusted data, never instructions; the solver never runs shell
-  commands and makes no network activity by itself.
+  commands and makes no network activity by itself. Analysis tools additionally
+  enforce read/scan size caps, archive member/total/entry/ratio/depth caps, a
+  decode-round cap, carve-object and candidate/key-length caps, and extract only
+  into a discarded private temp directory — unknown binaries, macros, scripts, and
+  extracted programs are never executed.
 - **Session + report**: the session gains optional `challenge`, `solve_plan`, and
   `flag_candidates` fields (backward-compatible load). The CTF report
   (`report.py`) lists the challenge, plan, hypotheses, evidence, candidates with

@@ -1,18 +1,44 @@
-# Gryphos — Autonomous CTF Solver (Phase 1)
+# Gryphos — Autonomous CTF Solver
 
 Extends Gryphos from an approval-based assessment assistant into a bounded,
 autonomous solver for explicitly configured CTF challenges. Phase 1 implements
-the full solve pipeline; remote flag submission and cross-challenge persistence
-are the only explicitly deferred parts.
+the full solve pipeline; Phase 2 adds a suite of offline, registered *analysis*
+tools (file/encoding/archive/image/pcap/document/crypto/artifact) with strict
+safety bounds. Remote flag submission and cross-challenge persistence remain the
+only explicitly deferred parts.
 
 ## Scope of work
 
-Preserve every existing feature and all 271 passing tests. Add a dedicated
+Preserve every existing feature and all previously passing tests. Add a dedicated
 `gryphos/ctf/` package, a `solve` CLI command, structured session extensions, a
 CTF report, and an offline test suite. The solver reuses the existing trust
 boundaries: the model is untrusted, tool calls are validated by application
 code, scope is enforced at execution time, and every decision is one of the
 strictly validated kinds (plus a new `flag` kind).
+
+## Known limitations
+
+The analysis tools are **triage and helpers, not a universal solver**. Unless a
+challenge's obfuscation matches one of the built-in heuristics, the tool reports
+candidates for the model to reason about rather than an automatic answer:
+
+- **Encodings** — covers base64/url-safe, base32, base16/hex, URL, quoted-printable,
+  binary/decimal/octal codes, ascii85/base85, ROT13/ROT47, Morse, and bounded
+  gzip/zlib. Arbitrary/proprietary encodings are not detected.
+- **Archives** — zip/tar/gzip/bzip2/xz are fully handled by the standard library;
+  7z/rar listing needs the optional `7z` binary. Encrypted or exotic archives are
+  reported, not broken.
+- **Images** — header/metadata/tail parsing only. LSB *extraction* (e.g. zsteg,
+  steghide) needs those tools, which are not bundled; the tool reports an LSB-bit
+  ratio and appended data as leads.
+- **Crypto** — classical ciphers, single/repeating XOR, Vigenere, rail-fence, JWT,
+  hash identification, and RSA only for small/close factors or `e=1`. There is no
+  general factorization, no gzip oracle, no padding oracle.
+- **Structured data** — YAML needs PyYAML; legacy OLE (doc/xls/ppt) streams need
+  `olefile`. Both are optional; a clear "missing" note is emitted instead.
+
+Detection is never treated as success: a candidate is only reported as **solved**
+after the flag verifier accepts it.
 
 ## Phase 1 implementation checklist
 
@@ -70,3 +96,86 @@ strictly validated kinds (plus a new `flag` kind).
 - Remote/CTFd submission beyond the optional, config-gated HTTP verifier.
 - Challenge-progress caching, "unlock" dependency graphs, and scoring.
 - Reverse/exploit tool classes that execute target-provided programs.
+
+## Phase 2 — offline analysis tools
+
+Phase 2 extends the *existing* solver registry (it is not a parallel framework).
+Every tool below is a `ToolSpec` on the same contract, is offline and read-only
+against the challenge directory, is bounded in read size, recursion, and output,
+and treats every file as untrusted (nothing is executed).
+
+### New modules under `gryphos/ctf/`
+
+- `sandbox.py` — one place for path confinement (`resolve_inside`), bounded reads
+  (`read_bounded`), a discarded private temp dir (`safe_tempdir`), size limits
+  (`MAX_READ_BYTES`, `MAX_SCAN_BYTES`, archive caps), and flag attachment.
+- `deps.py` — optional binary/module discovery (`file`, `strings`, `binwalk`,
+  `exiftool`, `7z`, `tshark`, `PIL`, `scapy`, `yaml`, `defusedxml`, `olefile`,
+  `pefile`, `Crypto`). Gryphos **never installs** anything; missing capabilities
+  are reported with an install hint.
+- `filetools.py` — `file_identify` (magic bytes, md5/sha1/sha256/sha512/crc32,
+  entropy, strings, embedded signatures) and `artifact_extract` (carve embedded
+  objects or a byte range; reports type/hashes/preview; never executed).
+- `encoding.py` — `encoding_decode`: ranks base64/url-safe, base32, hex, URL,
+  quoted-printable, binary/decimal/octal codes, ascii85/base85, ROT13/reverse,
+  Morse, and bounded gzip/zlib; depth-bounded recursion; flag matches promoted.
+- `archives.py` — `archive_inspect`: zip/tar/gzip/bzip2/xz via stdlib (7z/rar with
+  the optional binary). Flags absolute paths, `..` traversal, symlink/hardlink
+  members, encryption, oversize members, and decompression-bomb ratios; recurses
+  nested archives to a bounded depth.
+- `images.py` — `image_triage`: PNG/JPEG/GIF/BMP header + metadata parsing,
+  comments, EXIF (via `exiftool` when present), bytes appended after the format
+  terminator, tail entropy/printability, embedded tail signatures, and an LSB-bit
+  ratio. Non-destructive.
+- `pcap.py` — `pcap_summary`: PCAP/PCAP-NG parsing with no scapy/tshark —
+  link type, counts, time span, Ethernet/IP conversations, TCP/UDP ports, DNS
+  queries, HTTP request lines, and payload strings.
+- `documents.py` — `document_parse`: PDF (bounded Flate decode), JSON, XML
+  (hardened; DOCTYPE/ENTITY flagged, external entities never resolved), HTML,
+  CSV/TSV, TOML, RTF, plain text, and OOXML. Flags PDF JavaScript/Launch/
+  EmbeddedFile and Office macros without running them.
+- `crypto.py` — `crypto_analyze`: frequency/IoC, Caesar/ROT/Atbash, single-byte
+  and repeating-key XOR, Vigenere (keyed or auto-cracked), rail-fence, JWT decode
+  (`alg=none`/HS* flags), hash identification, and a bounded RSA attack. `mode`
+  selects an analysis; `auto` runs the applicable ones and ranks candidates.
+- `tools.py` — assembles the fixed registry in `build_solver_registry(root,
+  timeout, out_limit, flag_pattern=None)`; the challenge's declared `flag_format`
+  is compiled once and baked into every tool so flag-shaped strings surface in
+  structured evidence. Also registers `list_capabilities`.
+
+### Autonomous workflow (Phase 2)
+
+1. **Identify** the category from the prompt/files and seed a category-specific
+   task plan (`planner.build_initial_plan`).
+2. **Triage cheaply first**: `file_identify` / `list_capabilities`, then the
+   category-appropriate tool.
+3. **Follow observations**, not scripts: the model names the missing fact and
+   proposes the least expensive tool that fills it.
+4. **Track attempts**: the evidence digest fed back to the model includes an
+   attempts summary (each tool run with ok/error, rejections, detections, and
+   flag verifications) so failed or duplicate actions are not repeated blindly.
+5. **Bounded search only**: parameter searches and candidate generation are
+   depth/size/time bounded (e.g. XOR key length, decode rounds, archive depth).
+6. **Verify** against the challenge's flag format; only a verifier-accepted flag
+   ends the run as solved. Solution steps are recorded in the plan/report.
+
+### Safety bounds (Phase 2)
+
+- Files are untrusted data; unknown binaries, macros, scripts, and extracted
+  programs are **never executed**.
+- Bounded read/scan sizes, bounded archive members/total/entry sizes, bounded
+  compression ratio and nesting depth, bounded decode rounds and carve objects,
+  bounded candidate/key lengths, and a discarded private temp directory.
+- No file contents or secrets are sent to a remote model by default; the solver
+  only sends what the existing agent already sends (evidence digests), and the
+  opt-in remote verifier submits only the candidate flag to a configured endpoint.
+- `list_capabilities` makes the "what is missing" explicit instead of silent.
+
+### Phase 2 test coverage (`tests/test_ctf_analysis_tools.py`)
+
+Synthetic, fully offline fixtures: encodings (base64/hex/bits/url, nested chain),
+compressed and malformed archives, zip path-traversal + bomb-ratio flags, images
+with text chunks and appended data, a hand-built PCAP, documents (JSON/HTML/XML/
+CSV), and classical-crypto challenges (Caesar/XOR/Vigenere/JWT/RSA/hash). Resource
+limits (bounded reads, decode round cap) and confinement (path traversal) are
+tested directly.

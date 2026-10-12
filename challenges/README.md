@@ -14,8 +14,12 @@ solve <id>
 ```
 
 `solve` with no id lists the challenges found here. The solver is confined to the
-challenge directory: it can only read files inside it (the `challenge_file`
-tool), never the wider filesystem, and it makes no network activity by itself.
+challenge directory: every tool only reads files inside it (path traversal and
+absolute paths are rejected), never the wider filesystem, and it makes no network
+activity by itself. The read-only tools are `challenge_file`, `file_identify`,
+`encoding_decode`, `archive_inspect`, `image_triage`, `pcap_summary`,
+`document_parse`, `crypto_analyze`, `artifact_extract`, and `list_capabilities`
+(plus the passive `summarize_evidence` lens); nothing is executed.
 
 ## challenge.json fields
 

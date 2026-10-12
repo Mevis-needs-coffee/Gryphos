@@ -26,7 +26,19 @@ def registry(root):
 
 
 def test_registry_has_expected_tools(registry):
-    assert set(registry) == {"challenge_file", "summarize_evidence"}
+    assert set(registry) == {
+        "challenge_file",
+        "file_identify",
+        "encoding_decode",
+        "archive_inspect",
+        "image_triage",
+        "pcap_summary",
+        "document_parse",
+        "crypto_analyze",
+        "artifact_extract",
+        "list_capabilities",
+        "summarize_evidence",
+    }
 
 
 def test_no_shell_or_command_tools(registry):

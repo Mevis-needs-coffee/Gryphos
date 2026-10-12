@@ -157,8 +157,10 @@ class Solver:
 
         timeout = int(getattr(settings, "command_timeout", 45))
         out_limit = int(getattr(settings, "max_output_chars", 12000))
-        self.registry = build_solver_registry(challenge.root, timeout, out_limit)
         self.flag_format = FlagFormat.for_challenge(challenge)
+        self.registry = build_solver_registry(
+            challenge.root, timeout, out_limit, challenge.flag_format
+        )
         self.system_prompt = _build_ctf_prompt(challenge, self.registry, self.flag_format)
 
         self.max_steps = min(int(getattr(settings, "ctf_max_steps", 20)), MAX_STEPS_CEILING)
@@ -171,7 +173,8 @@ class Solver:
         self.evidence: list[dict] = []
         self.errors: list[str] = []
         self._fingerprints_seen: set[str] = set()
-        self._candidate_values: set[str] = set()
+        self._candidate_values: set[str] = set()  # values that already have a candidate record
+        self._evaluated_values: set[str] = set()  # values whose verification already ran
         self._failure_streak = 0
         self._solved_flag: str | None = None
 
@@ -200,7 +203,7 @@ class Solver:
                 return self._stop(
                     "time_budget", "Time budget exhausted. Stopping with a full report."
                 )
-            digest = summarize_evidence(self.evidence).output
+            digest = self._digest()
             try:
                 decision = self._decide(step, digest)
             except LLMError as exc:
@@ -280,6 +283,37 @@ class Solver:
             f"Expected flag format: {self.flag_format.description}."
         )
 
+    def _digest(self) -> str:
+        base = summarize_evidence(self.evidence).output
+        return f"{base}\n\n{self._attempts_summary()}"
+
+    def _attempts_summary(self) -> str:
+        """A compact, controller-owned log of what has already been tried.
+
+        Fed back to the model so it does not repeat rejected or failed actions
+        without a new reason, and so failed attempts remain visible.
+        """
+        lines: list[str] = []
+        for item in self.evidence:
+            kind = item.get("kind")
+            if kind == "tool_result":
+                status = "error" if item.get("error") else "ok"
+                lines.append(f"- {item.get('command') or item.get('tool')} [{status}]")
+            elif kind == "rejected":
+                lines.append(f"- REJECTED {item.get('tool')}: {item.get('reason')}")
+            elif kind == "note":
+                lines.append(f"- note: {item.get('message')}")
+            elif kind == "flag_detected":
+                lines.append(f"- flag-shaped string detected in {item.get('tool')}: {item.get('flag')}")
+            elif kind == "flag_verification":
+                lines.append(f"- flag {item.get('flag')} -> {item.get('status')} ({item.get('verifier')})")
+        if not lines:
+            return "Attempts so far: (none)."
+        return (
+            "Attempts so far (a rejected/failed/duplicate action must not be repeated "
+            "without a new reason):\n" + "\n".join(lines[-40:])
+        )
+
     # -- decisions --------------------------------------------------------
 
     def _handle_clarification(self, decision: ClarificationDecision, step: int) -> SolveOutcome | None:
@@ -312,12 +346,13 @@ class Solver:
             self.session.proposals.append(
                 {"kind": "flag", "flag": value, "source": decision.source, "step": step}
             )
-        if value in self._candidate_values:
+        if value in self._evaluated_values:
             self.console.print("[yellow]This flag candidate was already evaluated; not repeating it.[/yellow]")
             self.evidence.append(
                 {"kind": "note", "message": f"Repeat flag candidate ignored: {value}"}
             )
             return None
+        self._evaluated_values.add(value)
         self._candidate_values.add(value)
         verdict = verify_flag(
             value,
@@ -328,7 +363,17 @@ class Solver:
         )
         confidence = decision.confidence
         candidate = verdict.to_candidate(source=decision.source, confidence=confidence)
-        self.candidates.append(candidate)
+        # A value a tool already detected has an unverified candidate; promote it in
+        # place instead of recording a second, conflicting entry for the same flag.
+        existing = next((c for c in self.candidates if c.value == value), None)
+        if existing is not None:
+            existing.source = candidate.source
+            existing.confidence = candidate.confidence
+            existing.status = candidate.status
+            existing.verifier = candidate.verifier
+            existing.detail = candidate.detail
+        else:
+            self.candidates.append(candidate)
         self.evidence.append(
             {"kind": "flag_verification", "flag": value, "status": verdict.status,
              "verifier": verdict.verifier, "reason": verdict.detail, "step": step}

@@ -309,6 +309,14 @@ How the solver stays honest and bounded:
   directory (`challenge_file`) and summarize its own evidence. Path traversal,
   absolute paths, and symlink escapes are rejected; no shell and no network
   activity by the solver itself.
+- **Offline analysis tools.** Beyond file reading, the solver has read-only,
+  bounded tools for identification (`file_identify`), encodings
+  (`encoding_decode`), archives/compressed streams (`archive_inspect`), images
+  (`image_triage`), captures (`pcap_summary`), documents (`document_parse`),
+  crypto (`crypto_analyze`), artifact carving (`artifact_extract`), and
+  capability discovery (`list_capabilities`). They use system utilities or Python
+  libraries *when installed* and fall back to pure-stdlib implementations
+  otherwise; Gryphos never installs anything and reports what is missing.
 - **A persistent task plan** (pending/running/completed/failed/blocked) is seeded
   from the category, updated every step, and saved with the session and report.
 - **Duplicate-action and duplicate-flag prevention** via canonical fingerprints,
@@ -319,8 +327,13 @@ How the solver stays honest and bounded:
   only checks format conformance (the report says so); an opt-in CTFd-style HTTP
   verifier is used only for challenges that declare a `submit` block *and* when
   `GRYPHOS_CTF_REMOTE_VERIFY=true`.
-- **Untrusted data.** Provided file contents are treated as data, never as
-  instructions.
+- **Untrusted data, never executed.** Provided file contents are treated as data,
+  never as instructions; unknown binaries, macros, scripts, and extracted programs
+  are never run, and extraction targets a discarded temporary directory.
+- **Triage, not a universal solver.** The analysis tools cover common
+  encodings/archives/ciphers; unusual obfuscation, encrypted archives, and
+  LSB-extraction tools (e.g. steghide) are reported as leads rather than solved
+  automatically (see `docs/CTF_SOLVER.md`).
 
 ## Reports and sessions
 
@@ -406,6 +419,12 @@ ruff check gryphos/ main.py tests/
   it never scans networks, never runs shell commands, and only reads files inside
   the challenge directory. A format-matching flag is not independently confirmed
   unless a submit endpoint (opt-in) accepts it.
+- CTF analysis tools are offline triage: they cover common encodings, archives,
+  ciphers, images, captures, and documents, but unusual obfuscation, encrypted
+  archives, and pixel-level stego extraction may be out of reach; they report
+  leads instead of guessing. Optional external tools (`binwalk`, `exiftool`,
+  `7z`, `tshark`, `PIL`, `scapy`, ...) are used only if installed and are never
+  installed by Gryphos.
 - Reports can contain sensitive host information — sanitize before sharing.
 
 ## Security design and responsible use

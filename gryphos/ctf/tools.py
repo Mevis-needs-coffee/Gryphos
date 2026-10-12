@@ -1,16 +1,27 @@
 """Solver tool registry.
 
 The solver is given a deliberately small, fixed tool surface built on the same
-`ToolSpec` contract as the assessment tools:
+`ToolSpec` contract as the assessment tools. Every tool is offline, read-only
+against the challenge directory, and bounded:
 
-- `challenge_file` — read-only access to files *inside the challenge directory*.
-  The path is resolved and required to stay within the root; traversal, absolute
-  paths, and symlink escapes are rejected. Output is bounded and the file's size
-  and SHA-256 are recorded as evidence. No shell, no network, no writes.
+- `challenge_file` — read/list files *inside the challenge directory* (path is
+  resolved and required to stay within the root; traversal, absolute paths, and
+  symlink escapes are rejected). Records size and SHA-256.
+- `file_identify` — magic bytes, hashes, entropy, strings, embedded signatures.
+- `encoding_decode` — detect/decode common text and byte encodings, recursively.
+- `archive_inspect` — list/profile archives and compressed streams with limits.
+- `image_triage` — image metadata plus appended-data / LSB stego triage.
+- `pcap_summary` — offline PCAP/PCAP-NG dissection and payload strings.
+- `document_parse` — safe text/metadata extraction from documents/formats.
+- `crypto_analyze` — classical ciphers, XOR, frequency, JWT, hash, bounded RSA.
+- `artifact_extract` — carve embedded objects / byte ranges (never executed).
+- `list_capabilities` — report which optional binaries/libraries are present.
 - `summarize_evidence` — the existing offline evidence lens.
 
 This registry is separate from the assessment registry on purpose: `solve` and
-`assess` expose different, minimal capabilities.
+`assess` expose different, minimal capabilities. When a challenge declares a
+`flag_format`, it is baked into every tool so flag-shaped strings surface in the
+structured evidence the solver sees.
 """
 
 from __future__ import annotations
@@ -21,6 +32,15 @@ from pathlib import Path
 
 from ..analysis import summarize_evidence_spec
 from ..tools.base import ToolError, ToolResult, ToolSpec, duration_since
+from .archives import archive_inspect_spec
+from .crypto import crypto_analyze_spec
+from .deps import capabilities_report, capability_status
+from .documents import document_parse_spec
+from .encoding import encoding_decode_spec
+from .filetools import artifact_extract_spec, file_identify_spec
+from .flag import FlagFormat
+from .images import image_triage_spec
+from .pcap import pcap_summary_spec
 
 MAX_READ_BYTES = 65536
 _HEX_PREVIEW_BYTES = 256
@@ -147,10 +167,68 @@ def challenge_file_spec(root: Path, timeout: int, out_limit: int) -> ToolSpec:
     )
 
 
-def build_solver_registry(root: Path, timeout: int, out_limit: int) -> dict[str, ToolSpec]:
-    """Return the fixed solver tool set (confined file reader + evidence lens)."""
+def list_capabilities_spec(timeout: int, out_limit: int) -> ToolSpec:
+    def _run(args, scope_items, evidence=None) -> ToolResult:
+        started = datetime.now(UTC)
+        return ToolResult(
+            tool="list_capabilities",
+            target="(local)",
+            display="list_capabilities()",
+            returncode=0,
+            output=capabilities_report()[:out_limit],
+            network_active=False,
+            activity="passive",
+            started_at=started.isoformat(),
+            duration_seconds=duration_since(started),
+            data={"capabilities": capability_status()},
+        )
+
+    return ToolSpec(
+        name="list_capabilities",
+        description=(
+            "Report which optional binaries and Python libraries are available locally "
+            "(file, strings, binwalk, exiftool, 7z, tshark, PIL, scapy, ...) and what is "
+            "missing. Gryphos never installs anything; this only tells the solver which "
+            "tools can be used and where a bounded fallback applies."
+        ),
+        purpose="Choose tooling appropriate to the environment and report gaps to the operator.",
+        input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+        risk="informational",
+        side_effects="None: probes availability only.",
+        network_active=False,
+        approval_policy="none",
+        timeout=min(timeout, 10),
+        max_output_chars=out_limit,
+        activity="passive",
+        approval_level=1,
+        scope_requirements="None: local capability probe; no files or network.",
+        result_schema={"type": "object", "properties": {"capabilities": {"type": "array"}}},
+        show=lambda args: "list_capabilities()",
+        execute=_run,
+    )
+
+
+def build_solver_registry(
+    root: Path, timeout: int, out_limit: int, flag_pattern: str | None = None
+) -> dict[str, ToolSpec]:
+    """Return the fixed solver tool set.
+
+    `flag_pattern`, when supplied (the challenge's declared `flag_format`), is
+    compiled once and baked into every tool so flag-shaped strings are detected
+    inside each tool's own rendering and surfaced in structured evidence.
+    """
+    fmt = FlagFormat(flag_pattern) if flag_pattern else FlagFormat()
     specs = [
         challenge_file_spec(root, timeout, out_limit),
+        file_identify_spec(root, timeout, out_limit, fmt),
+        encoding_decode_spec(root, timeout, out_limit, fmt),
+        archive_inspect_spec(root, timeout, out_limit, fmt),
+        image_triage_spec(root, timeout, out_limit, fmt),
+        pcap_summary_spec(root, timeout, out_limit, fmt),
+        document_parse_spec(root, timeout, out_limit, fmt),
+        crypto_analyze_spec(root, timeout, out_limit, fmt),
+        artifact_extract_spec(root, timeout, out_limit, fmt),
+        list_capabilities_spec(timeout, out_limit),
         summarize_evidence_spec(timeout, out_limit),
     ]
     registry = {spec.name: spec for spec in specs}

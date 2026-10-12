@@ -60,6 +60,26 @@ def test_tool_then_flag(challenge, settings, quiet_console):
     assert any(e.get("kind") == "flag_verification" for e in outcome.evidence)
 
 
+def test_phase2_tool_surfaces_flag(challenge, settings, quiet_console):
+    # A Phase 2 analysis tool (encoding_decode) runs inside the loop; the flag it
+    # exposes must be recorded as a detection and then be verifiable.
+    import base64
+
+    blob = base64.b64encode(b"flag{decoded_by_tool}").decode()
+    (challenge.root / "notes.txt").write_text(f"hint: {blob}\n", encoding="utf-8")
+    llm = FakeLLM([tool_call("encoding_decode", {"path": "notes.txt"}, reason="decode"),
+                   flag("flag{decoded_by_tool}", source="encoding_decode")])
+    outcome = run_solver(llm, settings, challenge, console=quiet_console)
+    assert any(e.get("kind") == "tool_result" and e.get("tool") == "encoding_decode"
+               for e in outcome.evidence)
+    assert any(e.get("kind") == "flag_detected" and "decoded_by_tool" in str(e)
+               for e in outcome.evidence)
+    assert outcome.solved is True
+    matches = [c for c in outcome.flag_candidates if c["value"] == "flag{decoded_by_tool}"]
+    assert len(matches) == 1, "detection and verification must merge into one candidate"
+    assert matches[0]["status"] == "verified"
+
+
 # --- honesty / non-solutions ------------------------------------------------
 
 def test_wrong_format_flag_not_solved(challenge, settings, quiet_console):
