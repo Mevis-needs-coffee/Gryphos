@@ -41,6 +41,9 @@ from .filetools import artifact_extract_spec, file_identify_spec
 from .flag import FlagFormat
 from .images import image_triage_spec
 from .pcap import pcap_summary_spec
+from .webclient import WebClient
+from .webscope import WebScope
+from .webtools import web_fetch_spec
 
 MAX_READ_BYTES = 65536
 _HEX_PREVIEW_BYTES = 256
@@ -209,13 +212,22 @@ def list_capabilities_spec(timeout: int, out_limit: int) -> ToolSpec:
 
 
 def build_solver_registry(
-    root: Path, timeout: int, out_limit: int, flag_pattern: str | None = None
+    root: Path,
+    timeout: int,
+    out_limit: int,
+    flag_pattern: str | None = None,
+    web_scope: WebScope | None = None,
+    web_client: WebClient | None = None,
 ) -> dict[str, ToolSpec]:
     """Return the fixed solver tool set.
 
     `flag_pattern`, when supplied (the challenge's declared `flag_format`), is
     compiled once and baked into every tool so flag-shaped strings are detected
     inside each tool's own rendering and surfaced in structured evidence.
+
+    When a challenge declares an authorized web mission, the caller passes a
+    matching `web_scope`/`web_client`; the read-oriented web tools are then added
+    to the registry. Without them the solver has no network capability at all.
     """
     fmt = FlagFormat(flag_pattern) if flag_pattern else FlagFormat()
     specs = [
@@ -231,6 +243,8 @@ def build_solver_registry(
         list_capabilities_spec(timeout, out_limit),
         summarize_evidence_spec(timeout, out_limit),
     ]
+    if web_scope is not None and web_client is not None:
+        specs.append(web_fetch_spec(web_scope, web_client, fmt, timeout, out_limit))
     registry = {spec.name: spec for spec in specs}
     if len(registry) != len(specs):
         raise ValueError("Duplicate solver tool name.")
