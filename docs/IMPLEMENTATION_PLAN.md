@@ -61,7 +61,7 @@ Baseline verification: modules import, `validate_target` accepts `127.0.0.1` and
 Verified via the automated suite (offline) plus targeted live checks where a key
 was available:
 
-- **Automated:** `python -m pytest` → 340 passed; `ruff check gryphos/ main.py tests/` → clean.
+- **Automated:** `python -m pytest` → 488 passed; `ruff check gryphos/ main.py tests/` → clean. All CTF analysis and web tests are fully offline (web tests run against a local mock server bound to `127.0.0.1`); no public target is contacted by the suite.
 - **Live OpenRouter (manual, not required by tests):** catalog fetch returned 458
   models with exact IDs and free flags; exact-ID selection succeeded; a concrete
   free model returned valid decision JSON through `_create`; a 429 rate-limit and
