@@ -9,7 +9,7 @@ from gryphos.ctf.flag import FlagFormat
 from gryphos.ctf.webclient import WebClient
 from gryphos.ctf.webconfig import WebConfig
 from gryphos.ctf.webscope import WebScope
-from gryphos.ctf.webtools import web_fetch_spec
+from gryphos.ctf.webtools import web_analyze_spec, web_crawl_spec, web_fetch_spec
 from gryphos.tools.base import ToolError, validate_args
 
 
@@ -143,3 +143,104 @@ def test_registry_only_exposes_web_tools_when_authorized(server, tmp_path):
     client = WebClient(scope, timeout=2)
     online = build_solver_registry(tmp_path, 30, 8000, web_scope=scope, web_client=client)
     assert "web_fetch" in online
+
+
+# --- web_crawl --------------------------------------------------------------
+
+def _crawl_spec(server, **overrides):
+    config = WebConfig.from_dict({"origin": server.origin, "lab": True, **overrides})
+    scope = WebScope(config)
+    client = WebClient(scope, timeout=2)
+    return web_crawl_spec(scope, client, FlagFormat(), 30, 12000), scope, client
+
+
+@pytest.fixture
+def linky():
+    with MockWebServer() as srv:
+        srv.html("/", '<a href="/a">A</a> <a href="/b">B</a> <a href="http://example.com/out">out</a>')
+        srv.html("/a", '<a href="/c">C</a>')
+        srv.html("/b", "B page")
+        srv.html("/c", "C page")
+        yield srv
+
+
+def test_crawl_visits_same_origin_and_lists_offsite(linky):
+    spec, scope, client = _crawl_spec(linky)
+    result = run(spec, client, path="/", max_pages=5, depth=2)
+    paths = {page["path"] for page in result.data["pages"]}
+    assert {"/", "/a", "/b", "/c"} <= paths
+    assert any("example.com" in ref for ref in result.data["offsite_references"])
+    fetched = {req["route"] for req in linky.requests}
+    assert "example.com" not in " ".join(fetched)
+
+
+def test_crawl_respects_max_pages(linky):
+    spec, scope, client = _crawl_spec(linky)
+    result = run(spec, client, path="/", max_pages=2, depth=3)
+    assert len(result.data["pages"]) <= 2
+
+
+def test_crawl_stops_at_budget(linky):
+    spec, scope, client = _crawl_spec(linky, max_requests=1)
+    result = run(spec, client, path="/", max_pages=5, depth=3)
+    assert len(result.data["pages"]) == 1
+    assert result.data["stopped"]
+
+
+# --- web_analyze ------------------------------------------------------------
+
+def _analyze_spec(server, **overrides):
+    config = WebConfig.from_dict({"origin": server.origin, "lab": True, **overrides})
+    scope = WebScope(config)
+    client = WebClient(scope, timeout=2)
+    return web_analyze_spec(scope, client, FlagFormat(), 30, 12000), scope, client
+
+
+@pytest.fixture
+def rich_page():
+    page = (
+        "<html><head><title>Login</title>"
+        '<meta name="generator" content="flask"></head><body>'
+        "<!-- TODO: remove debug admin panel -->"
+        '<form action="/login" method="post">'
+        '<input name="username"><input name="password" type="password">'
+        '<input type="hidden" name="csrf" value="x"></form>'
+        '<script src="/static/app.js"></script>'
+        '<script>fetch("/api/items"); go("/admin/panel");</script>'
+        "flag{analyze_me}</body></html>"
+    )
+    with MockWebServer() as srv:
+        srv.html("/", page)
+        srv.add("/robots.txt", Route(status=200, body=b"User-agent: *\nDisallow: /admin", content_type="text/plain"))
+        srv.add("/sitemap.xml", Route(status=200, body=b"<urlset></urlset>", content_type="application/xml"))
+        yield srv
+
+
+def test_analyze_extracts_structure(rich_page):
+    spec, scope, client = _analyze_spec(rich_page)
+    result = run(spec, client, path="/")
+    assert result.data["title"] == "Login"
+    assert result.data["meta"]["generator"] == "flask"
+    assert result.data["forms"][0]["method"] == "post"
+    assert {f["name"] for f in result.data["forms"][0]["fields"]} == {"username", "password", "csrf"}
+    assert "/api/items" in result.data["endpoints"]
+    assert any("TODO" in c for c in result.data["comments"])
+    assert result.data["flags"] == ["flag{analyze_me}"]
+
+
+def test_analyze_optional_robots(rich_page):
+    spec, scope, client = _analyze_spec(rich_page)
+    result = run(spec, client, path="/", include_robots=True)
+    extra_paths = {extra["path"]: extra for extra in result.data["extras"]}
+    assert extra_paths["/robots.txt"]["status"] == 200
+    assert "Disallow" in extra_paths["/robots.txt"]["body"]
+
+
+def test_registry_exposes_all_web_tools(linky):
+    from gryphos.ctf.tools import build_solver_registry
+
+    config = WebConfig.from_dict({"origin": linky.origin, "lab": True})
+    scope = WebScope(config)
+    client = WebClient(scope, timeout=2)
+    registry = build_solver_registry(linky, 30, 8000, web_scope=scope, web_client=client)
+    assert {"web_fetch", "web_crawl", "web_analyze"} <= set(registry)
