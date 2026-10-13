@@ -43,7 +43,13 @@ from .images import image_triage_spec
 from .pcap import pcap_summary_spec
 from .webclient import WebClient
 from .webscope import WebScope
-from .webtools import web_analyze_spec, web_crawl_spec, web_fetch_spec
+from .webtools import (
+    web_analyze_spec,
+    web_crawl_spec,
+    web_fetch_spec,
+    web_probe_spec,
+    web_session_spec,
+)
 
 MAX_READ_BYTES = 65536
 _HEX_PREVIEW_BYTES = 256
@@ -247,6 +253,8 @@ def build_solver_registry(
         specs.append(web_fetch_spec(web_scope, web_client, fmt, timeout, out_limit))
         specs.append(web_crawl_spec(web_scope, web_client, fmt, timeout, out_limit))
         specs.append(web_analyze_spec(web_scope, web_client, fmt, timeout, out_limit))
+        specs.append(web_session_spec(web_scope, web_client, fmt, timeout, out_limit))
+        specs.append(web_probe_spec(web_scope, web_client, fmt, timeout, out_limit))
     registry = {spec.name: spec for spec in specs}
     if len(registry) != len(specs):
         raise ValueError("Duplicate solver tool name.")

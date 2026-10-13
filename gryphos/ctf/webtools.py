@@ -13,9 +13,10 @@ same-origin redirects) and renders status, redacted headers, and a bounded body.
 from __future__ import annotations
 
 import html as html_mod
+import json
 import re
 from datetime import UTC, datetime
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urlencode, urljoin, urlsplit
 
 from ..tools.base import ToolError, ToolResult, ToolSpec, duration_since
 from .flag import FlagFormat
@@ -26,7 +27,16 @@ from .webscope import WebScope, WebScopeError, WebTarget
 MAX_REDIRECT_HOPS = 5
 MAX_CRAWL_PAGES = 25
 MAX_CRAWL_DEPTH = 3
+MAX_PROBE_VARIANTS = 6
 MAX_LIST_ITEMS = 60
+SECURITY_HEADERS = (
+    "strict-transport-security",
+    "content-security-policy",
+    "x-frame-options",
+    "x-content-type-options",
+    "referrer-policy",
+    "permissions-policy",
+)
 
 _TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.I | re.S)
 _META_RE = re.compile(r"<meta\s+([^>]+?)/?>", re.I | re.S)
@@ -117,6 +127,49 @@ def _extract_endpoints(html: str, inline_js: str) -> list[str]:
         if path not in found and not path.startswith(("//", "/>")):
             found.append(path)
     return found[:MAX_LIST_ITEMS]
+
+
+def _encode_fields(fields: object) -> bytes:
+    if not isinstance(fields, dict):
+        return b""
+    return urlencode([(str(k), str(v)) for k, v in fields.items()]).encode()
+
+
+def _append_query(path: str, query: object) -> str:
+    if not isinstance(query, dict) or not query:
+        return path
+    sep = "&" if "?" in path else "?"
+    return path + sep + urlencode([(str(k), str(v)) for k, v in query.items()])
+
+
+def _json_summary(body: str, content_type: str) -> dict | None:
+    stripped = body.lstrip()
+    if "json" not in (content_type or "") and not stripped.startswith(("{", "[")):
+        return None
+    try:
+        parsed = json.loads(body)
+    except (ValueError, TypeError):
+        return None
+    if isinstance(parsed, dict):
+        return {"type": "object", "keys": sorted(str(k) for k in parsed)[:MAX_LIST_ITEMS]}
+    if isinstance(parsed, list):
+        return {"type": "array", "length": len(parsed)}
+    return {"type": type(parsed).__name__}
+
+
+def _security_headers(header_map: dict[str, str]) -> dict[str, str | None]:
+    return {name: header_map.get(name) for name in SECURITY_HEADERS}
+
+
+def _set_cookie_names(responses: list[WebResponse]) -> list[str]:
+    names: list[str] = []
+    for response in responses:
+        for key, value in response.headers:
+            if key.lower() == "set-cookie":
+                name = value.split("=", 1)[0].strip()
+                if name and name not in names:
+                    names.append(name)
+    return names
 
 
 
@@ -634,5 +687,272 @@ def web_analyze_spec(
             + (", robots" if args.get("include_robots") else "")
             + ")"
         ),
+        execute=_run,
+    )
+
+
+def web_session_spec(
+    scope: WebScope, client: WebClient, fmt: FlagFormat, timeout: int, out_limit: int
+) -> ToolSpec:
+    def _run(args, scope_items, evidence=None) -> ToolResult:
+        started = datetime.now(UTC)
+        if args.get("clear_cookies"):
+            client.clear_cookies()
+        target = _authorize(scope, args.get("path") or "/")
+        method = str(args.get("method") or "POST").upper()
+        follow = bool(args.get("follow_redirects", False))
+        body = _encode_fields(args.get("fields")) if method == "POST" else None
+        headers = {"Content-Type": "application/x-www-form-urlencoded"} if body else None
+        try:
+            if follow:
+                responses = client.request_with_redirects(
+                    method, target, headers=headers, body=body,
+                    max_hops=MAX_REDIRECT_HOPS, allow_repeat=True,
+                )
+            else:
+                responses = [client.request(method, target, headers=headers, body=body, allow_repeat=True)]
+        except WebClientError as exc:
+            raise ToolError(str(exc)) from exc
+        final = responses[-1]
+        final_map = final.header_map()
+        snapshot = client.cookies_snapshot()
+        set_names = _set_cookie_names(responses)
+        security = _security_headers(final_map)
+
+        lines = [render_responses(responses, out_limit), ""]
+        lines.append("Session cookies set (values redacted):")
+        lines.append("  " + (", ".join(set_names) if set_names else "(none)"))
+        lines.append("Cookies now held by the client:")
+        if snapshot:
+            lines.extend(
+                f"  {c['name']} (path={c['path']}, secure={c['secure']}, httpOnly={c['http_only']}, "
+                f"sameSite={c['same_site'] or '-'})"
+                for c in snapshot
+            )
+        else:
+            lines.append("  (none)")
+        missing = [name for name, value in security.items() if value is None]
+        lines.append("Security headers present: " + ", ".join(k for k, v in security.items() if v))
+        if missing:
+            lines.append("Security headers missing: " + ", ".join(missing))
+        data = {
+            "request_url": target.url,
+            "method": method,
+            "responses": [r.to_dict(redacted=True) for r in responses],
+            "final_status": final.status,
+            "final_error": final.error,
+            "set_cookie_names": set_names,
+            "cookies": snapshot,
+            "security_headers": security,
+            "used_requests": client.request_count,
+            "remaining_requests": client.remaining,
+        }
+        result = ToolResult(
+            tool="web_session",
+            target=target.url,
+            display=f"web_session({method} {target.path})",
+            returncode=final.status if final.ok else None,
+            output="\n".join(lines)[:out_limit],
+            network_active=True,
+            activity="active",
+            started_at=started.isoformat(),
+            duration_seconds=duration_since(started),
+            data=data,
+            error=final.error,
+        )
+        return attach_flags(result, fmt)
+
+    return ToolSpec(
+        name="web_session",
+        description=(
+            "Submit a form or authenticate against a same-origin endpoint and track the "
+            "resulting session. Cookies set by the server are stored in-memory and sent on "
+            "later same-origin requests; cookie values are always redacted in output. Also "
+            "reports present/missing security headers. Only GET/POST; POST bodies are "
+            "form-encoded from `fields`."
+        ),
+        purpose="Establish and inspect a session (login, form submit) and its cookies.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Form/endpoint path, e.g. /login."},
+                "method": {"type": "string", "enum": ["GET", "POST"], "description": "Default POST."},
+                "fields": {
+                    "type": "object",
+                    "description": "Form field name/value pairs to submit (POST).",
+                },
+                "follow_redirects": {
+                    "type": "boolean",
+                    "description": "Follow same-origin redirects (default false).",
+                },
+                "clear_cookies": {
+                    "type": "boolean",
+                    "description": "Discard all cookies before this request (default false).",
+                },
+            },
+            "required": ["path"],
+            "additionalProperties": False,
+        },
+        risk="medium",
+        side_effects=(
+            "Sends a bounded GET/POST to the authorized origin; may change server-side "
+            "session state for this challenge but performs no destructive action."
+        ),
+        network_active=True,
+        approval_policy="explicit",
+        timeout=min(timeout, 30),
+        max_output_chars=out_limit,
+        activity="active",
+        approval_level=2,
+        scope_requirements="Same-origin only; bounded by request budget, size, and rate.",
+        result_schema={
+            "type": "object",
+            "properties": {
+                "final_status": {"type": "integer"},
+                "set_cookie_names": {"type": "array"},
+                "cookies": {"type": "array"},
+            },
+        },
+        show=lambda args: f"web_session({args.get('method', 'POST')} {args.get('path')!r})",
+        execute=_run,
+    )
+
+
+def web_probe_spec(
+    scope: WebScope, client: WebClient, fmt: FlagFormat, timeout: int, out_limit: int
+) -> ToolSpec:
+    def _run(args, scope_items, evidence=None) -> ToolResult:
+        started = datetime.now(UTC)
+        base_path = str(args.get("path") or "/")
+        method = str(args.get("method") or "GET").upper()
+        raw_variants = args.get("variants")
+        variants = raw_variants if isinstance(raw_variants, list) and raw_variants else [{}]
+        variants = variants[:MAX_PROBE_VARIANTS]
+        results: list[dict] = []
+        bodies: list[str] = []
+        for index, raw_variant in enumerate(variants):
+            variant = raw_variant if isinstance(raw_variant, dict) else {}
+            label = str(variant.get("label") or f"v{index}")
+            req_path = _append_query(base_path, variant.get("query"))
+            target = _authorize(scope, req_path)
+            headers = variant.get("headers")
+            headers = {str(k): str(v) for k, v in headers.items()} if isinstance(headers, dict) else None
+            body = _encode_fields(variant.get("fields")) if method == "POST" else None
+            try:
+                response = client.request(method, target, headers=headers, body=body, allow_repeat=True)
+            except WebClientError as exc:
+                raise ToolError(str(exc)) from exc
+            item = response.to_dict(redacted=True)
+            bodies.append(response.body)
+            results.append({
+                "label": label,
+                "url": item["url"],
+                "status": response.status,
+                "reason": response.reason,
+                "content_type": response.content_type,
+                "body_length": response.body_length,
+                "body_truncated": response.body_truncated,
+                "body": item["body"],
+                "json": _json_summary(response.body, response.content_type),
+                "error": response.error,
+            })
+
+        baseline = results[0]
+        for item in results[1:]:
+            diffs = []
+            if item["status"] != baseline["status"]:
+                diffs.append(f"status {baseline['status']}->{item['status']}")
+            if item["body_length"] != baseline["body_length"]:
+                diffs.append(f"length {baseline['body_length']}->{item['body_length']}")
+            if item["body"] != baseline["body"] and not diffs:
+                diffs.append("body differs")
+            item["diff_vs_baseline"] = diffs
+
+        lines = [f"Probe {method} {baseline['url']} ({len(results)} variant(s), baseline={baseline['label']})", ""]
+        for item in results:
+            header = (
+                f"[{item['label']}] {item['status']} {item['reason']}".rstrip()
+                + f" ({item['content_type'] or '?'}, {item['body_length']}B)"
+            )
+            if item.get("diff_vs_baseline"):
+                header += "  DIFF: " + ", ".join(item["diff_vs_baseline"])
+            lines.append(header)
+            if item["json"]:
+                lines.append(f"    json: {item['json']}")
+            if item["error"]:
+                lines.append(f"    error: {item['error']}")
+        lines.append("")
+        for item in results:
+            lines.append(f"--- {item['label']} body ---")
+            lines.append(item["body"][:800] if item["body"] else "(empty)")
+        data = {
+            "path": base_path,
+            "method": method,
+            "variants": results,
+            "used_requests": client.request_count,
+            "remaining_requests": client.remaining,
+        }
+        result = ToolResult(
+            tool="web_probe",
+            target=baseline["url"],
+            display=f"web_probe({method} {base_path}, variants={len(results)})",
+            returncode=baseline["status"] if baseline["error"] is None else None,
+            output="\n".join(lines)[:out_limit],
+            network_active=True,
+            activity="active",
+            started_at=started.isoformat(),
+            duration_seconds=duration_since(started),
+            data=data,
+            error=baseline["error"],
+        )
+        return attach_flags_from(result, fmt, bodies)
+
+    return ToolSpec(
+        name="web_probe",
+        description=(
+            "Send a controlled series of same-origin requests (GET/POST/HEAD/OPTIONS) and "
+            "compare their status, content-type, size, and body. Use variants to test "
+            "specific inputs (query params or form fields) against the same endpoint and see "
+            "how behavior changes. Structured JSON responses are summarized. Identical "
+            "requests are intentional here (allowed repeats for comparison)."
+        ),
+        purpose="Compare endpoint behavior across controlled inputs to confirm hypotheses.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Endpoint path, e.g. /search."},
+                "method": {
+                    "type": "string",
+                    "enum": ["GET", "HEAD", "POST", "OPTIONS"],
+                    "description": "HTTP method (default GET).",
+                },
+                "variants": {
+                    "type": "array",
+                    "description": (
+                        "Up to 6 inputs to compare. Each: {label, query:{...} for GET, "
+                        "fields:{...} for POST, headers:{...}}."
+                    ),
+                },
+            },
+            "required": ["path"],
+            "additionalProperties": False,
+        },
+        risk="medium",
+        side_effects=(
+            "Sends up to 6 bounded requests to the authorized origin; POST may change "
+            "application state for this challenge (no destructive actions)."
+        ),
+        network_active=True,
+        approval_policy="explicit",
+        timeout=min(timeout, 45),
+        max_output_chars=out_limit,
+        activity="active",
+        approval_level=2,
+        scope_requirements="Same-origin only; bounded by variant count, request budget, and size.",
+        result_schema={
+            "type": "object",
+            "properties": {"variants": {"type": "array"}, "method": {"type": "string"}},
+        },
+        show=lambda args: f"web_probe({args.get('method', 'GET')} {args.get('path')!r})",
         execute=_run,
     )

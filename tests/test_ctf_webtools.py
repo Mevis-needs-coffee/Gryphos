@@ -9,7 +9,13 @@ from gryphos.ctf.flag import FlagFormat
 from gryphos.ctf.webclient import WebClient
 from gryphos.ctf.webconfig import WebConfig
 from gryphos.ctf.webscope import WebScope
-from gryphos.ctf.webtools import web_analyze_spec, web_crawl_spec, web_fetch_spec
+from gryphos.ctf.webtools import (
+    web_analyze_spec,
+    web_crawl_spec,
+    web_fetch_spec,
+    web_probe_spec,
+    web_session_spec,
+)
 from gryphos.tools.base import ToolError, validate_args
 
 
@@ -244,3 +250,133 @@ def test_registry_exposes_all_web_tools(linky):
     client = WebClient(scope, timeout=2)
     registry = build_solver_registry(linky, 30, 8000, web_scope=scope, web_client=client)
     assert {"web_fetch", "web_crawl", "web_analyze"} <= set(registry)
+
+
+# --- web_session ------------------------------------------------------------
+
+def _session_spec(server, **overrides):
+    config = WebConfig.from_dict({"origin": server.origin, "lab": True, **overrides})
+    scope = WebScope(config)
+    client = WebClient(scope, timeout=2)
+    return web_session_spec(scope, client, FlagFormat(), 30, 12000), scope, client
+
+
+@pytest.fixture
+def session_server():
+    def login(server, handler):
+        return Route(
+            status=200,
+            body=b"<a href='/dashboard'>d</a>",
+            content_type="text/html",
+            headers=[("Set-Cookie", "sid=secret123; Path=/; HttpOnly")],
+        )
+
+    def dashboard(server, handler):
+        if "sid=secret123" in (handler.headers.get("Cookie") or ""):
+            return Route(status=200, body=b"welcome flag{session_ok}", content_type="text/html")
+        return Route(status=403, body=b"denied", content_type="text/html")
+
+    with MockWebServer() as srv:
+        srv.add("/login", login)
+        srv.add("/dashboard", dashboard)
+        yield srv
+
+
+def test_session_stores_and_uses_cookie(session_server):
+    spec, scope, client = _session_spec(session_server)
+    result = run(spec, client, path="/login", method="POST", fields={"user": "a", "pass": "b"})
+    assert "sid" in result.data["set_cookie_names"]
+    assert "secret123" not in result.output
+    assert result.data["cookies"][0]["http_only"] is True
+
+    follow = run(spec, client, path="/dashboard", method="GET")
+    assert follow.data["final_status"] == 200
+    assert any("session_ok" in f for f in follow.data.get("flags", []))
+
+
+def test_session_clear_cookies(session_server):
+    spec, scope, client = _session_spec(session_server)
+    run(spec, client, path="/login", method="POST", fields={"user": "a"})
+    run(spec, client, path="/dashboard", method="GET", clear_cookies=True)
+    result = run(spec, client, path="/dashboard", method="GET")
+    assert result.data["final_status"] == 403
+
+
+def test_session_reports_security_headers(session_server):
+    spec, scope, client = _session_spec(session_server)
+    result = run(spec, client, path="/login", method="GET")
+    assert "content-security-policy" in result.data["security_headers"]
+
+
+def test_secure_cookie_not_sent_over_http():
+    def login(server, handler):
+        return Route(status=200, body=b"ok", headers=[("Set-Cookie", "sid=x; Path=/; Secure")])
+
+    def secure_only(server, handler):
+        has = "sid=x" in (handler.headers.get("Cookie") or "")
+        return Route(status=200 if has else 403, body=b"")
+
+    with MockWebServer() as srv:
+        srv.add("/login", login)
+        srv.add("/private", secure_only)
+        spec, scope, client = _session_spec(srv)
+        run(spec, client, path="/login", method="GET")
+        result = run(spec, client, path="/private", method="GET")
+        assert result.data["final_status"] == 403
+
+
+# --- web_probe --------------------------------------------------------------
+
+def _probe_spec(server, **overrides):
+    config = WebConfig.from_dict({"origin": server.origin, "lab": True, **overrides})
+    scope = WebScope(config)
+    client = WebClient(scope, timeout=2)
+    return web_probe_spec(scope, client, FlagFormat(), 30, 12000), scope, client
+
+
+@pytest.fixture
+def probe_server():
+    from urllib.parse import parse_qs
+    from urllib.parse import urlsplit as us
+
+    def search(server, handler):
+        q = parse_qs(us(handler.path).query).get("q", [""])[0]
+        if q == "admin":
+            return Route(status=200, body=b"flag{probe_admin}", content_type="text/plain")
+        return Route(status=200, body=b"no results", content_type="text/plain")
+
+    def api(server, handler):
+        import json as _json
+        return Route(status=200, body=_json.dumps({"ok": True, "n": 1}).encode(), content_type="application/json")
+
+    with MockWebServer() as srv:
+        srv.add("/search", search)
+        srv.add("/api", api)
+        yield srv
+
+
+def test_probe_compares_variants(probe_server):
+    spec, scope, client = _probe_spec(probe_server)
+    result = run(spec, client, path="/search", method="GET", variants=[
+        {"label": "normal", "query": {"q": "x"}},
+        {"label": "admin", "query": {"q": "admin"}},
+    ])
+    admin = result.data["variants"][1]
+    assert admin["diff_vs_baseline"]
+    assert any("probe_admin" in f for f in result.data.get("flags", []))
+
+
+def test_probe_json_summary(probe_server):
+    spec, scope, client = _probe_spec(probe_server)
+    result = run(spec, client, path="/api", method="GET", variants=[{"label": "one"}])
+    assert result.data["variants"][0]["json"]["keys"] == ["n", "ok"]
+
+
+def test_registry_exposes_session_and_probe(session_server):
+    from gryphos.ctf.tools import build_solver_registry
+
+    config = WebConfig.from_dict({"origin": session_server.origin, "lab": True})
+    scope = WebScope(config)
+    client = WebClient(scope, timeout=2)
+    registry = build_solver_registry(session_server, 30, 8000, web_scope=scope, web_client=client)
+    assert {"web_session", "web_probe"} <= set(registry)

@@ -201,6 +201,49 @@ def tls_context() -> ssl.SSLContext:
     return ssl.create_default_context()
 
 
+@dataclass
+class Cookie:
+    name: str
+    value: str
+    domain: str
+    path: str = "/"
+    secure: bool = False
+    http_only: bool = False
+    same_site: str | None = None
+
+
+def _domain_match(host: str, domain: str) -> bool:
+    host = (host or "").lower()
+    domain = (domain or "").lower().lstrip(".")
+    return domain == "" or host == domain or host.endswith("." + domain)
+
+
+def parse_set_cookie(value: str, default_domain: str) -> Cookie | None:
+    parts = [p.strip() for p in (value or "").split(";")]
+    if not parts or "=" not in parts[0]:
+        return None
+    name, _, cookie_value = parts[0].partition("=")
+    name = name.strip()
+    if not name:
+        return None
+    cookie = Cookie(name=name, value=cookie_value.strip(), domain=default_domain)
+    for part in parts[1:]:
+        key, _, attr = part.partition("=")
+        key = key.strip().lower()
+        attr = attr.strip()
+        if key == "domain" and attr:
+            cookie.domain = attr.lstrip(".").lower()
+        elif key == "path" and attr:
+            cookie.path = attr
+        elif key == "secure":
+            cookie.secure = True
+        elif key == "httponly":
+            cookie.http_only = True
+        elif key == "samesite" and attr:
+            cookie.same_site = attr
+    return cookie
+
+
 class WebClient:
     """A single-run, bounded HTTP client bound to one `WebScope`."""
 
@@ -211,6 +254,7 @@ class WebClient:
         self._count = 0
         self._last_ts = 0.0
         self._cache: dict[str, WebResponse] = {}
+        self._cookies: list[Cookie] = []
 
     @property
     def request_count(self) -> int:
@@ -219,6 +263,50 @@ class WebClient:
     @property
     def remaining(self) -> int:
         return max(0, self.scope.max_requests - self._count)
+
+    # -- cookies ----------------------------------------------------------
+
+    def store_cookies(self, headers: list[tuple[str, str]], host: str) -> list[Cookie]:
+        stored: list[Cookie] = []
+        for key, value in headers:
+            if key.lower() != "set-cookie":
+                continue
+            cookie = parse_set_cookie(value, host)
+            if cookie is None:
+                continue
+            self._cookies = [
+                c for c in self._cookies
+                if not (c.name == cookie.name and c.domain == cookie.domain and c.path == cookie.path)
+            ]
+            self._cookies.append(cookie)
+            stored.append(cookie)
+        return stored
+
+    def clear_cookies(self) -> None:
+        self._cookies = []
+
+    def cookie_header(self, target: WebTarget) -> str | None:
+        pairs = [
+            f"{c.name}={c.value}"
+            for c in self._cookies
+            if _domain_match(target.host, c.domain)
+            and target.path.startswith(c.path)
+            and (not c.secure or target.scheme == "https")
+        ]
+        return "; ".join(pairs) if pairs else None
+
+    def cookies_snapshot(self) -> list[dict]:
+        return [
+            {
+                "name": c.name,
+                "domain": c.domain,
+                "path": c.path,
+                "secure": c.secure,
+                "http_only": c.http_only,
+                "same_site": c.same_site,
+            }
+            for c in self._cookies
+        ]
 
     # -- public API -------------------------------------------------------
 
@@ -309,10 +397,14 @@ class WebClient:
                 "u": target.url,
                 "h": sorted((str(k).lower(), str(v)) for k, v in (headers or {}).items()),
                 "b": (body or b"").hex(),
+                "c": self._cookie_fingerprint(),
             },
             sort_keys=True,
         )
         return canonical
+
+    def _cookie_fingerprint(self) -> str:
+        return ";".join(sorted(f"{c.name}={c.value}@{c.domain}{c.path}" for c in self._cookies))
 
     def _send_with_retries(
         self, method: str, target: WebTarget, headers: dict | None, body: bytes | None, limit: int
@@ -354,6 +446,10 @@ class WebClient:
             request_headers[str(key)] = str(value)
         if body is not None and "Content-Type" not in request_headers:
             request_headers["Content-Type"] = "application/x-www-form-urlencoded"
+        if not any(k.lower() == "cookie" for k in request_headers):
+            jar_cookie = self.cookie_header(target)
+            if jar_cookie:
+                request_headers["Cookie"] = jar_cookie
         connection = self._connection(target, resolved_ip)
         try:
             connection.request(method, target.path, body=body, headers=request_headers)
@@ -377,6 +473,7 @@ class WebClient:
         header_map = {k.lower(): v for k, v in raw_headers}
         content_type = header_map.get("content-type", "").split(";")[0].strip()
         redirect = header_map.get("location")
+        self.store_cookies(raw_headers, target.host)
         elapsed = int((time.monotonic() - started) * 1000)
         return WebResponse(
             method=method,
