@@ -249,7 +249,14 @@ def test_registry_exposes_all_web_tools(linky):
     scope = WebScope(config)
     client = WebClient(scope, timeout=2)
     registry = build_solver_registry(linky, 30, 8000, web_scope=scope, web_client=client)
-    assert {"web_fetch", "web_crawl", "web_analyze"} <= set(registry)
+    assert {
+        "web_fetch",
+        "web_crawl",
+        "web_analyze",
+        "web_session",
+        "web_probe",
+        "web_clues",
+    } <= set(registry)
 
 
 # --- web_session ------------------------------------------------------------

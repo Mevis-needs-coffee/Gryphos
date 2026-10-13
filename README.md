@@ -192,9 +192,11 @@ GRYPHOS_ALLOWED_TARGETS=127.0.0.1/32
   `GRYPHOS_TIME_BUDGET_SECONDS`, `GRYPHOS_MODEL_CACHE_TTL`, `GRYPHOS_CTF_MAX_STEPS`)
   are clamped to safe ranges; invalid values fall back to defaults with a log warning.
 - CTF solver settings: `GRYPHOS_CTF_CHALLENGES_DIR` (default `challenges`),
-  `GRYPHOS_CTF_MAX_STEPS` (1-100, default 20), and `GRYPHOS_CTF_REMOTE_VERIFY`
-  (default `false`). Remote flag submission only works for challenges that declare
-  a `submit` block and is off unless you explicitly enable it.
+  `GRYPHOS_CTF_MAX_STEPS` (1-100, default 20), `GRYPHOS_CTF_REMOTE_VERIFY`
+  (default `false`), and `GRYPHOS_CTF_WEB_ENABLED` (default `true`; a global kill
+  switch for the authorized web tools). Remote flag submission only works for
+  challenges that declare a `submit` block and is off unless you explicitly enable
+  it.
 
 ### OpenRouter API key
 
@@ -301,14 +303,14 @@ gryphos solve example-warmup  # solve one
 
 See [`challenges/README.md`](challenges/README.md) for the `challenge.json`
 format (id, one of 9 categories, description, task, optional `flag_format`
-regex, optional CTFd-style `submit` block, provided files).
+regex, optional CTFd-style `submit` block, provided files, and an optional `web`
+block that authorizes a single web origin).
 
 How the solver stays honest and bounded:
 
 - **Confined tools only.** The solver can read files *inside* the challenge
   directory (`challenge_file`) and summarize its own evidence. Path traversal,
-  absolute paths, and symlink escapes are rejected; no shell and no network
-  activity by the solver itself.
+  absolute paths, and symlink escapes are rejected; no shell access.
 - **Offline analysis tools.** Beyond file reading, the solver has read-only,
   bounded tools for identification (`file_identify`), encodings
   (`encoding_decode`), archives/compressed streams (`archive_inspect`), images
@@ -317,6 +319,14 @@ How the solver stays honest and bounded:
   capability discovery (`list_capabilities`). They use system utilities or Python
   libraries *when installed* and fall back to pure-stdlib implementations
   otherwise; Gryphos never installs anything and reports what is missing.
+- **Authorized web tools (opt-in).** A challenge may declare a `web` block naming
+  exactly one `origin`; only then do `web_fetch`, `web_crawl`, `web_analyze`,
+  `web_session`, `web_probe`, and the offline `web_clues` exist. Requests are
+  method-, size-, count-, and rate-bounded; the host is re-resolved and every
+  address validated per request; cloud-metadata/link-local ranges are always
+  blocked; cross-origin redirects are refused unless opted in; and cookies,
+  tokens, and credentials are redacted before they reach the model or the report.
+  `GRYPHOS_CTF_WEB_ENABLED=false` forces them off globally.
 - **A persistent task plan** (pending/running/completed/failed/blocked) is seeded
   from the category, updated every step, and saved with the session and report.
 - **Duplicate-action and duplicate-flag prevention** via canonical fingerprints,
@@ -327,9 +337,10 @@ How the solver stays honest and bounded:
   only checks format conformance (the report says so); an opt-in CTFd-style HTTP
   verifier is used only for challenges that declare a `submit` block *and* when
   `GRYPHOS_CTF_REMOTE_VERIFY=true`.
-- **Untrusted data, never executed.** Provided file contents are treated as data,
-  never as instructions; unknown binaries, macros, scripts, and extracted programs
-  are never run, and extraction targets a discarded temporary directory.
+- **Untrusted data, never executed.** Provided file contents and HTTP responses
+  are treated as data, never as instructions; unknown binaries, macros, scripts,
+  and extracted programs are never run, and extraction targets a discarded
+  temporary directory.
 - **Triage, not a universal solver.** The analysis tools cover common
   encodings/archives/ciphers; unusual obfuscation, encrypted archives, and
   LSB-extraction tools (e.g. steghide) are reported as leads rather than solved

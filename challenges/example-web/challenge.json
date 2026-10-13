@@ -1,0 +1,17 @@
+{
+  "id": "example-web",
+  "name": "Example Web (authorized origin)",
+  "category": "web",
+  "description": "Template for an authorized web challenge. Point web.origin at a service you own or are explicitly authorized to test. This example targets a local lab server; set lab=true so loopback/private ranges are permitted.",
+  "task": "Explore the authorized origin, find the flag, and report where it came from.",
+  "flag_format": "flag\\{[^}]{1,200}\\}",
+  "files": [],
+  "web": {
+    "origin": "http://127.0.0.1:8080",
+    "lab": true,
+    "allow_cross_origin_redirects": false,
+    "max_requests": 40,
+    "max_body_bytes": 262144,
+    "min_interval_ms": 0
+  }
+}

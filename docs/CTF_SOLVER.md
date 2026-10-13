@@ -179,3 +179,83 @@ with text chunks and appended data, a hand-built PCAP, documents (JSON/HTML/XML/
 CSV), and classical-crypto challenges (Caesar/XOR/Vigenere/JWT/RSA/hash). Resource
 limits (bounded reads, decode round cap) and confinement (path traversal) are
 tested directly.
+
+## Phase 3 — authorized web solving
+
+Phase 3 adds a bounded, scope-pinned HTTP capability to the **same** solver
+registry. It is off unless a challenge explicitly authorizes a single origin, and
+even then every request passes through the same execution-time guard. Nothing in
+the model's output can widen the scope.
+
+### New modules under `gryphos/ctf/`
+
+- `webconfig.py` — `WebConfig`: the operator's authorization (one `origin`,
+  optional `lab`, cross-origin-redirect opt-in, and clamped `max_requests` /
+  `max_body_bytes` / `min_interval_ms` bounds). Loaded from the challenge's `web`
+  block; a missing block means no web tools at all.
+- `webscope.py` — `WebScope`: turns the config into an execution boundary.
+  Validates scheme/host/port/path, refuses cross-origin unless opted in, and
+  **re-resolves the host on every request, rejecting the request if any resolved
+  address is blocked**. Cloud-metadata/link-local/multicast ranges are blocked
+  unconditionally; private/loopback/reserved need `lab: true`.
+- `webclient.py` — `WebClient`: a bounded HTTP client pinned to a validated IP
+  (Host header + TLS SNI preserved, redirects never followed silently). Enforces
+  the request budget and min-interval, caps body reads, retries idempotent GET/HEAD
+  on transient failures, dedups identical requests (fingerprint includes cookie
+  state) unless a comparison deliberately repeats one, keeps an in-memory cookie
+  jar (Secure cookies withheld over http), and redacts cookies / `Authorization` /
+  sensitive query & body values.
+- `webtools.py` — the registered tools (below) plus an HTML/JS structural parser
+  and a `collect_web_clues` synthesizer shared by `web_clues` and the report.
+
+### Registered web tools
+
+- `web_fetch` — fetch one same-origin resource (GET/HEAD), optional same-origin
+  redirect chain, renders status/redacted headers/bounded body.
+- `web_crawl` — bounded breadth-first same-origin link traversal (`max_pages`,
+  `depth`); offsite links are listed but never fetched.
+- `web_analyze` — page structure: title, meta, forms + fields, same-origin vs
+  offsite links, external/inline scripts, referenced endpoint paths, HTML comments,
+  optional `/robots.txt` and `/sitemap.xml`.
+- `web_session` — submit a form / authenticate, track the session cookie jar, and
+  report set-cookie names, held cookies, and present/missing security headers
+  (cookie values always redacted).
+- `web_probe` — send up to six controlled same-origin variants (query params,
+  form fields, headers) and compare status/size/body; JSON responses are summarized.
+- `web_clues` — **offline** (no network) prioritization of the web evidence
+  gathered so far: endpoints, forms, cookies, parameters, JSON keys, comment hints,
+  offsite refs, missing security headers, and flag candidates, ranked by
+  security-relevant keywords.
+
+All web tools bake in the challenge's `flag_format`, so flags surfacing in any
+fetched body appear in structured evidence.
+
+### Safety bounds (Phase 3)
+
+- **Authorization is explicit and configuration-driven.** No `web` block → no web
+  tools. `GRYPHOS_CTF_WEB_ENABLED=false` disables them even when declared.
+- **Scope is enforced at execution time**, per request and per redirect hop; the
+  resolved IP — not the model's chosen string — is what is contacted.
+- Methods are restricted to GET/HEAD/POST/OPTIONS; body size, request count, and
+  rate are bounded; response bodies are read with a hard byte cap.
+- Cookies, `Authorization` headers, and sensitive query/body values are redacted
+  before anything reaches the model, evidence, or the report. The write-up shows
+  cookie **names** only.
+- The solver treats every response as untrusted data, never as instructions.
+
+### Phase 3 test coverage
+
+Fully offline, using a local mock HTTP server (`tests/webserver.py`) bound to
+`127.0.0.1`; no public target is ever contacted:
+
+- `tests/test_ctf_web_config.py` — origin/bounds validation, `lab` requirement,
+  ceiling clamps.
+- `tests/test_ctf_webscope.py` — IP policy, blocked ranges, cross-origin refusal,
+  path/DoS guards.
+- `tests/test_ctf_webclient.py` — budget, size caps, retries, dedup vs deliberate
+  repeats, method restrictions, redirect handling, redaction.
+- `tests/test_ctf_webtools.py` — each tool end-to-end against the mock server,
+  including flag surfacing, cookie tracking, Secure-cookie handling, probe
+  comparison, and clue ranking.
+- `tests/test_ctf_web_solve.py` — solver integration (fetch→verify), prompt/plan
+  seeding, the kill switch, and that an origin is unreachable without authorization.
