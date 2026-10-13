@@ -176,6 +176,27 @@ def build_initial_plan(challenge: Challenge) -> TaskPlan:
     )
     for suggestion in _CATEGORY_TASKS.get(challenge.category, ()):
         plan.add(suggestion, f"Category '{challenge.category}' tool strategy.")
+    if getattr(challenge, "web", None) is not None:
+        plan.add(
+            "Fetch and analyze the authorized origin's root page (web_fetch/web_analyze).",
+            "The entry page defines the application's structure and entry points.",
+        )
+        plan.add(
+            "Crawl same-origin links to map reachable routes (web_crawl).",
+            "Unmapped routes are where hidden functionality usually lives.",
+        )
+        plan.add(
+            "Inspect forms, cookies, security headers, and sessions (web_session).",
+            "Authentication and session handling are common sources of flags.",
+        )
+        plan.add(
+            "Compare endpoint behavior across controlled inputs (web_probe).",
+            "Behavioral differences reveal injection points and logic flaws.",
+        )
+        plan.add(
+            "Call web_clues to prioritize the most promising lead.",
+            "Rank clues by evidence rather than guessing the next request.",
+        )
     plan.add(
         "Analyze the most promising artifact and record concrete observations.",
         "Observations, not guesses, drive the solution.",

@@ -50,6 +50,7 @@ from .planner import TaskPlan, build_initial_plan
 from .tools import build_solver_registry
 from .webclient import WebClient
 from .webscope import WebScope, WebScopeError
+from .webtools import collect_web_clues
 
 log = logging.getLogger("gryphos.ctf.solver")
 
@@ -210,13 +211,21 @@ class Solver:
 
     def run(self) -> SolveOutcome:
         self.challenge.status = "running"
+        web_line = ""
+        if self.web_scope is not None:
+            web_line = (
+                f"\n[bold]Authorized web origin:[/bold] {self.web_scope.origin} "
+                f"(lab={self.web_scope.lab}, max {self.web_scope.max_requests} requests)"
+            )
+        elif self.web_error:
+            web_line = f"\n[bold yellow]Web disabled:[/bold yellow] {self.web_error}"
         self._print(
             f"[bold]Challenge:[/bold] {self.challenge.name} ({self.challenge.category})\n"
             f"[bold]Task:[/bold] {self.challenge.task or self.challenge.description}\n"
             f"[bold]Files:[/bold] {', '.join(self.challenge.files) or '(none)'}\n"
             f"[bold]Model:[/bold] {self.llm.model}   "
             f"[bold]Step limit:[/bold] {self.max_steps}   "
-            f"[bold]Time budget:[/bold] {self.time_budget}s",
+            f"[bold]Time budget:[/bold] {self.time_budget}s" + web_line,
             title="Gryphos CTF solve",
         )
         deadline = time.monotonic() + self.time_budget
@@ -331,11 +340,34 @@ class Solver:
             elif kind == "flag_verification":
                 lines.append(f"- flag {item.get('flag')} -> {item.get('status')} ({item.get('verifier')})")
         if not lines:
-            return "Attempts so far: (none)."
-        return (
+            lines.append("(none).")
+        summary = (
             "Attempts so far (a rejected/failed/duplicate action must not be repeated "
             "without a new reason):\n" + "\n".join(lines[-40:])
         )
+        web_summary = self._web_clue_summary()
+        if web_summary:
+            summary += "\n\n" + web_summary
+        return summary
+
+    def _web_clue_summary(self) -> str:
+        """A controller-owned, prioritized digest of the web clues gathered so far."""
+        if self.web_scope is None:
+            return ""
+        clues, meta = collect_web_clues(self.evidence)
+        entries = sorted(clues.values(), key=lambda e: (-e["priority"], e["kind"], e["value"]))[:10]
+        if not entries and not meta["cookies"]:
+            return ""
+        lines = ["Prioritized web clues (highest first):"]
+        lines.extend(f"- [{e['kind']}] {e['value']} (p={e['priority']})" for e in entries)
+        untouched = [e["value"] for e in entries if e["kind"] == "endpoint"]
+        if untouched:
+            lines.append("Endpoints seen: " + ", ".join(untouched[:10]))
+        if meta["cookies"]:
+            lines.append("Session cookies held: " + ", ".join(meta["cookies"]))
+        if meta["security_gaps"]:
+            lines.append("Missing security headers: " + ", ".join(sorted(meta["security_gaps"])))
+        return "\n".join(lines)
 
     # -- decisions --------------------------------------------------------
 

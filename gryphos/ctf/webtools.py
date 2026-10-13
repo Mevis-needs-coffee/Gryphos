@@ -1004,7 +1004,7 @@ def _add_clue(clues: dict, kind: str, value: str, source: str) -> None:
     clues[key] = {"kind": kind, "value": value, "priority": score, "source": source, "reason": reason}
 
 
-def _collect_web_clues(evidence: list[dict]) -> tuple[dict, dict]:
+def collect_web_clues(evidence: list[dict]) -> tuple[dict, dict]:
     clues: dict[tuple[str, str], dict] = {}
     meta: dict = {
         "visited_paths": set(),
@@ -1084,7 +1084,7 @@ def web_clues_spec(fmt: FlagFormat, out_limit: int) -> ToolSpec:
         started = datetime.now(UTC)
         focus = str(args.get("focus") or "").strip().lower()
         max_items = int(args.get("max_items") or 20)
-        clues, meta = _collect_web_clues(list(evidence or []))
+        clues, meta = collect_web_clues(list(evidence or []))
         entries = list(clues.values())
         if focus:
             for entry in entries:
