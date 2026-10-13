@@ -55,17 +55,17 @@ def _int_env(name: str) -> int:
     return value
 
 
-def _bool_env(name: str) -> bool:
-    """Parse a truthy/falsey env flag; unknown values default to False."""
+def _bool_env(name: str, default: bool = False) -> bool:
+    """Parse a truthy/falsey env flag; unset uses `default`, unknown is `default`."""
     raw = (os.getenv(name) or "").strip().lower()
     if not raw:
-        return False
+        return default
     if raw in {"1", "true", "yes", "on"}:
         return True
     if raw in {"0", "false", "no", "off"}:
         return False
-    log.warning("Ignoring invalid %s=%r; treating as false", name, raw)
-    return False
+    log.warning("Ignoring invalid %s=%r; treating as %s", name, raw, default)
+    return default
 
 
 @dataclass(frozen=True)
@@ -87,6 +87,7 @@ class Settings:
     ctf_challenges_dir: Path = field(default_factory=lambda: Path("challenges"))
     ctf_max_steps: int = 20
     ctf_remote_verify: bool = False
+    ctf_web_enabled: bool = True
 
     @property
     def api_key_configured(self) -> bool:
@@ -120,6 +121,7 @@ class Settings:
             "ctf_challenges_dir": str(self.ctf_challenges_dir),
             "ctf_max_steps": self.ctf_max_steps,
             "ctf_remote_verify": self.ctf_remote_verify,
+            "ctf_web_enabled": self.ctf_web_enabled,
         }
 
 
@@ -152,4 +154,5 @@ def get_settings() -> Settings:
         ),
         ctf_max_steps=_int_env("GRYPHOS_CTF_MAX_STEPS"),
         ctf_remote_verify=_bool_env("GRYPHOS_CTF_REMOTE_VERIFY"),
+        ctf_web_enabled=_bool_env("GRYPHOS_CTF_WEB_ENABLED", default=True),
     )

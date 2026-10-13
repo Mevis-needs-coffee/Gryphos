@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .webconfig import WebConfig, WebConfigError
+
 # The nine challenge families the solver understands. A challenge must declare
 # exactly one; the category seeds the initial task plan and the solver prompt.
 CHALLENGE_CATEGORIES: tuple[str, ...] = (
@@ -120,6 +122,7 @@ class Challenge:
     flag_format: str | None = None  # optional regex; None uses the default matcher
     submit: dict | None = None  # optional CTFd-style {"url","token","field"}
     files: tuple[str, ...] = ()
+    web: WebConfig | None = None  # optional authorized web origin (Phase 3)
     status: str = "pending"
 
     def __post_init__(self) -> None:
@@ -150,11 +153,18 @@ class Challenge:
             "flag_format": self.flag_format,
             "submit": dict(self.submit) if self.submit else None,
             "files": list(self.files),
+            "web": self.web.to_dict() if self.web else None,
             "status": self.status,
         }
 
     @classmethod
     def from_dict(cls, data: dict, root: Path) -> Challenge:
+        web: WebConfig | None = None
+        if data.get("web") is not None:
+            try:
+                web = WebConfig.from_dict(data["web"])
+            except WebConfigError as exc:
+                raise ValueError(f"invalid web block: {exc}") from exc
         return cls(
             id=str(data["id"]).strip(),
             name=str(data.get("name") or data["id"]).strip(),
@@ -165,5 +175,6 @@ class Challenge:
             flag_format=data.get("flag_format") or None,
             submit=data.get("submit") or None,
             files=tuple(str(f) for f in (data.get("files") or [])),
+            web=web,
             status=str(data.get("status", "pending")),
         )

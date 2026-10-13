@@ -26,6 +26,7 @@ from .loader import ChallengeError, discover_challenges, load_challenge
 from .models import CHALLENGE_CATEGORIES, Challenge, FlagCandidate, Hypothesis
 from .planner import TaskItem, TaskPlan
 from .solver import SolveOutcome, Solver, run_solver
+from .webconfig import WebConfig, WebConfigError
 
 __all__ = [
     "CHALLENGE_CATEGORIES",
@@ -40,6 +41,8 @@ __all__ = [
     "Solver",
     "TaskItem",
     "TaskPlan",
+    "WebConfig",
+    "WebConfigError",
     "detect_flags",
     "discover_challenges",
     "load_challenge",
