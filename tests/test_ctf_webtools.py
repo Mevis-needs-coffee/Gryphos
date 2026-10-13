@@ -380,3 +380,81 @@ def test_registry_exposes_session_and_probe(session_server):
     client = WebClient(scope, timeout=2)
     registry = build_solver_registry(session_server, 30, 8000, web_scope=scope, web_client=client)
     assert {"web_session", "web_probe"} <= set(registry)
+
+
+# --- web_clues --------------------------------------------------------------
+
+def _clue_spec():
+    from gryphos.ctf.webtools import web_clues_spec
+
+    return web_clues_spec(FlagFormat(), 12000)
+
+
+def _sample_evidence():
+    return [
+        {
+            "kind": "tool_result",
+            "tool": "web_analyze",
+            "command": "web_analyze('/')",
+            "data": {
+                "request_url": "http://127.0.0.1:9/",
+                "endpoints": ["/admin/panel", "/api/items"],
+                "same_origin_links": [{"url": "http://127.0.0.1:9/login", "path": "/login", "kind": "a"}],
+                "forms": [{"action": "http://127.0.0.1:9/login", "method": "post",
+                           "fields": [{"name": "user", "type": "text"}]}],
+                "comments": ["TODO remove debug endpoint"],
+            },
+        },
+        {
+            "kind": "tool_result",
+            "tool": "web_session",
+            "command": "web_session(POST /login)",
+            "data": {
+                "set_cookie_names": ["sid"],
+                "cookies": [{"name": "sid"}],
+                "security_headers": {"content-security-policy": None, "x-frame-options": "DENY"},
+            },
+        },
+        {"kind": "flag_detected", "flag": "flag{clue_here}", "tool": "web_fetch"},
+    ]
+
+
+def test_clues_prioritize_and_summarize():
+    spec = _clue_spec()
+    result = spec.execute({"max_items": 10}, (), _sample_evidence())
+    assert result.network_active is False
+    assert result.activity == "passive"
+    values = {c["value"] for c in result.data["clues"]}
+    assert "/admin/panel" in values
+    priorities = [c["priority"] for c in result.data["clues"]]
+    assert priorities == sorted(priorities, reverse=True)
+    assert "/admin/panel" in result.data["untouched_endpoints"]
+    assert "content-security-policy" in result.data["missing_security_headers"]
+    assert "flag{clue_here}" in result.data["flag_candidates"]
+
+
+def test_clues_focus_biases_ranking():
+    spec = _clue_spec()
+    plain = spec.execute({"max_items": 10}, (), _sample_evidence())
+    focused = spec.execute({"max_items": 10, "focus": "admin"}, (), _sample_evidence())
+    plain_admin = next(c for c in plain.data["clues"] if c["value"] == "/admin/panel")
+    focused_admin = next(c for c in focused.data["clues"] if c["value"] == "/admin/panel")
+    assert focused_admin["priority"] > plain_admin["priority"]
+
+
+def test_clues_empty_evidence():
+    spec = _clue_spec()
+    result = spec.execute({}, (), [])
+    assert result.data["clues"] == []
+    assert "no web clues" in result.output
+
+
+def test_registry_exposes_clues(session_server):
+    from gryphos.ctf.tools import build_solver_registry
+
+    config = WebConfig.from_dict({"origin": session_server.origin, "lab": True})
+    scope = WebScope(config)
+    client = WebClient(scope, timeout=2)
+    registry = build_solver_registry(session_server, 30, 8000, web_scope=scope, web_client=client)
+    assert "web_clues" in registry
+    assert registry["web_clues"].network_active is False

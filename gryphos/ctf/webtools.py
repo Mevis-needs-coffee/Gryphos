@@ -956,3 +956,229 @@ def web_probe_spec(
         show=lambda args: f"web_probe({args.get('method', 'GET')} {args.get('path')!r})",
         execute=_run,
     )
+
+
+_CLUE_KEYWORDS = (
+    ("flag", 5),
+    (".git", 4),
+    (".env", 4),
+    ("admin", 4),
+    ("debug", 3),
+    ("internal", 3),
+    ("private", 3),
+    ("secret", 3),
+    ("token", 2),
+    ("password", 2),
+    ("passwd", 2),
+    ("api", 2),
+    ("config", 2),
+    ("backup", 2),
+    ("upload", 2),
+    ("robots", 2),
+    ("sitemap", 2),
+    ("login", 1),
+    ("auth", 1),
+    ("dashboard", 1),
+    ("sql", 2),
+    ("eval", 3),
+    ("exec", 3),
+)
+
+
+def _score_text(text: str) -> tuple[int, list[str]]:
+    low = (text or "").lower()
+    matched = [kw for kw, _ in _CLUE_KEYWORDS if kw in low]
+    score = sum(weight for kw, weight in _CLUE_KEYWORDS if kw in low)
+    return score, matched
+
+
+def _add_clue(clues: dict, kind: str, value: str, source: str) -> None:
+    value = (value or "").strip()
+    if not value:
+        return
+    key = (kind, value)
+    if key in clues:
+        return
+    score, matched = _score_text(value)
+    reason = f"matched: {', '.join(matched)}" if matched else "observed reference"
+    clues[key] = {"kind": kind, "value": value, "priority": score, "source": source, "reason": reason}
+
+
+def _collect_web_clues(evidence: list[dict]) -> tuple[dict, dict]:
+    clues: dict[tuple[str, str], dict] = {}
+    meta: dict = {
+        "visited_paths": set(),
+        "cookies": [],
+        "security_gaps": set(),
+        "offsite": [],
+        "flag_candidates": [],
+    }
+    for item in evidence or []:
+        kill = item.get("kind")
+        if kill in ("flag_detected", "flag_verification"):
+            value = item.get("flag")
+            if value and value not in meta["flag_candidates"]:
+                meta["flag_candidates"].append(value)
+            if value:
+                _add_clue(clues, "flag_candidate", str(value), str(item.get("tool") or "detector"))
+            continue
+        if kill != "tool_result":
+            continue
+        tool = str(item.get("tool") or "")
+        data = item.get("data") or {}
+        if not isinstance(data, dict):
+            continue
+        source = str(item.get("command") or tool)
+        for url in (data.get("request_url"), data.get("start_url")):
+            if url:
+                meta["visited_paths"].add(urlsplit(str(url)).path or "/")
+        for page in data.get("pages") or []:
+            if isinstance(page, dict) and page.get("path"):
+                meta["visited_paths"].add(str(page["path"]))
+        for link in data.get("same_origin_links") or []:
+            if isinstance(link, dict) and link.get("path"):
+                _add_clue(clues, "endpoint", str(link["path"]), source)
+        for path in data.get("endpoints") or []:
+            _add_clue(clues, "endpoint", str(path), source)
+        for form in data.get("forms") or []:
+            if not isinstance(form, dict):
+                continue
+            action = str(form.get("action") or "")
+            path = urlsplit(action).path or action
+            _add_clue(clues, "form", f"{str(form.get('method', 'get')).upper()} {path}", source)
+            if path:
+                _add_clue(clues, "endpoint", path, source)
+        for name in data.get("set_cookie_names") or []:
+            if name and name not in meta["cookies"]:
+                meta["cookies"].append(str(name))
+            _add_clue(clues, "cookie", str(name), source)
+        gaps = data.get("security_headers")
+        if isinstance(gaps, dict):
+            for header, value in gaps.items():
+                if value is None:
+                    meta["security_gaps"].add(str(header))
+        for ref in data.get("offsite_references") or []:
+            if ref not in meta["offsite"]:
+                meta["offsite"].append(str(ref))
+        for comment in data.get("comments") or []:
+            _add_clue(clues, "hint", str(comment)[:200], source)
+        for variant in data.get("variants") or []:
+            if not isinstance(variant, dict):
+                continue
+            url = str(variant.get("url") or "")
+            for pair in urlsplit(url).query.split("&"):
+                key = pair.split("=", 1)[0]
+                if key:
+                    _add_clue(clues, "parameter", key, source)
+        if "json" in data and isinstance(data.get("json"), dict):
+            for key in data["json"].get("keys") or []:
+                _add_clue(clues, "json_key", str(key), source)
+        for extra in data.get("extras") or []:
+            if isinstance(extra, dict) and extra.get("body"):
+                _add_clue(clues, "source", str(extra.get("path") or "extra"), source)
+    return clues, meta
+
+
+def web_clues_spec(fmt: FlagFormat, out_limit: int) -> ToolSpec:
+    def _run(args, scope_items, evidence=None) -> ToolResult:
+        started = datetime.now(UTC)
+        focus = str(args.get("focus") or "").strip().lower()
+        max_items = int(args.get("max_items") or 20)
+        clues, meta = _collect_web_clues(list(evidence or []))
+        entries = list(clues.values())
+        if focus:
+            for entry in entries:
+                if focus in entry["value"].lower():
+                    entry["priority"] += 1
+                    entry["reason"] += f"; matches focus '{focus}'"
+        entries.sort(key=lambda e: (-e["priority"], e["kind"], e["value"]))
+        entries = entries[:max_items]
+
+        untouched = [
+            e["value"] for e in entries
+            if e["kind"] == "endpoint" and e["value"] not in meta["visited_paths"]
+        ]
+
+        lines = [
+            f"Web clue synthesis: {len(entries)} clue(s)"
+            + (f" (focus={focus!r})" if focus else ""),
+            "",
+        ]
+        if meta["flag_candidates"]:
+            lines.append("Flag candidates seen so far: " + ", ".join(meta["flag_candidates"]))
+        if meta["cookies"]:
+            lines.append("Session cookies held: " + ", ".join(meta["cookies"]))
+        lines.append("Prioritized clues (highest first):")
+        for index, entry in enumerate(entries, 1):
+            lines.append(
+                f"  {index}. [{entry['kind']}] {entry['value']} "
+                f"(p={entry['priority']}) — {entry['reason']} ({entry['source']})"
+            )
+        if not entries:
+            lines.append("  (no web clues recorded yet)")
+        if untouched:
+            lines.append("")
+            lines.append("Untouched endpoints worth trying: " + ", ".join(untouched))
+        if meta["security_gaps"]:
+            lines.append("")
+            lines.append("Missing security headers: " + ", ".join(sorted(meta["security_gaps"])))
+        data = {
+            "clues": entries,
+            "flag_candidates": meta["flag_candidates"],
+            "cookies": meta["cookies"],
+            "untouched_endpoints": untouched,
+            "missing_security_headers": sorted(meta["security_gaps"]),
+            "offsite_references": meta["offsite"],
+        }
+        result = ToolResult(
+            tool="web_clues",
+            target="(evidence)",
+            display="web_clues()",
+            returncode=0,
+            output="\n".join(lines)[:out_limit],
+            network_active=False,
+            activity="passive",
+            started_at=started.isoformat(),
+            duration_seconds=duration_since(started),
+            data=data,
+        )
+        return attach_flags(result, fmt)
+
+    return ToolSpec(
+        name="web_clues",
+        description=(
+            "Offline synthesis (no network) of the web evidence gathered so far: endpoints, "
+            "forms, cookies, parameters, JSON keys, hints/comments, offsite references, "
+            "missing security headers, and flag candidates. Clues are prioritized by "
+            "security-relevant keywords so the next action targets the most promising lead."
+        ),
+        purpose="Prioritize hypotheses and choose the most promising next request.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "focus": {"type": "string", "description": "Optional keyword to bias ranking."},
+                "max_items": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 40,
+                    "description": "Maximum clues to report (default 20).",
+                },
+            },
+            "additionalProperties": False,
+        },
+        risk="informational",
+        side_effects="None: reads the evidence already collected; makes no requests.",
+        network_active=False,
+        approval_policy="none",
+        timeout=10,
+        max_output_chars=out_limit,
+        activity="passive",
+        approval_level=1,
+        scope_requirements="None: local synthesis of recorded evidence.",
+        result_schema={
+            "type": "object",
+            "properties": {"clues": {"type": "array"}, "untouched_endpoints": {"type": "array"}},
+        },
+        show=lambda args: f"web_clues(focus={args.get('focus')!r})" if args.get("focus") else "web_clues()",
+        execute=_run,
+    )

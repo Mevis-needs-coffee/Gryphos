@@ -45,6 +45,7 @@ from .webclient import WebClient
 from .webscope import WebScope
 from .webtools import (
     web_analyze_spec,
+    web_clues_spec,
     web_crawl_spec,
     web_fetch_spec,
     web_probe_spec,
@@ -255,6 +256,7 @@ def build_solver_registry(
         specs.append(web_analyze_spec(web_scope, web_client, fmt, timeout, out_limit))
         specs.append(web_session_spec(web_scope, web_client, fmt, timeout, out_limit))
         specs.append(web_probe_spec(web_scope, web_client, fmt, timeout, out_limit))
+        specs.append(web_clues_spec(fmt, out_limit))
     registry = {spec.name: spec for spec in specs}
     if len(registry) != len(specs):
         raise ValueError("Duplicate solver tool name.")
