@@ -83,6 +83,41 @@ def test_report_files_written(tmp_path):
     assert payload["report_context"]["solved"] is True
 
 
+def test_report_omits_web_section_without_web_challenge():
+    session = make_session()
+    session.challenge = {"id": "x", "name": "X", "category": "misc"}
+    outcome = {"status": "unsolved", "solved": False, "message": "", "plan": {},
+               "flag_candidates": [], "hypotheses": [], "evidence": []}
+    md = build_ctf_markdown(session, outcome)
+    assert "Web activity" not in md
+
+
+def test_report_includes_redacted_web_section():
+    session = make_session()
+    session.challenge = {
+        "id": "webby", "name": "Webby", "category": "web",
+        "web": {"origin": "http://127.0.0.1:8080", "lab": True,
+                "max_requests": 40, "max_body_bytes": 262144},
+    }
+    evidence = [
+        {"kind": "tool_result", "tool": "web_fetch", "command": "web_fetch(GET '/')",
+         "data": {"final_status": 200, "request_url": "http://127.0.0.1:8080/"}},
+        {"kind": "tool_result", "tool": "web_session", "command": "web_session(POST /login)",
+         "data": {"set_cookie_names": ["sid"], "cookies": [{"name": "sid"}],
+                  "security_headers": {"content-security-policy": None, "x-frame-options": "DENY"}}},
+        {"kind": "tool_result", "tool": "web_analyze", "command": "web_analyze('/')",
+         "data": {"endpoints": ["/admin/panel"], "forms": []}},
+    ]
+    outcome = {"status": "unsolved", "solved": False, "message": "", "plan": {},
+               "flag_candidates": [], "hypotheses": [], "evidence": evidence}
+    md = build_ctf_markdown(session, outcome)
+    assert "7. Web activity" in md
+    assert "http://127.0.0.1:8080" in md
+    assert "sid" in md
+    assert "content-security-policy" in md
+    assert "/admin/panel" in md
+
+
 # --- CLI --------------------------------------------------------------------
 
 def test_solve_in_commands_and_help():
