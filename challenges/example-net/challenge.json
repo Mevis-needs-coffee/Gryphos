@@ -1,0 +1,18 @@
+{
+  "id": "example-net",
+  "name": "Example Network (authorized target)",
+  "category": "network",
+  "description": "Template for an authorized network challenge. Point target.host at a host you own or are explicitly authorized to test (e.g. a TryHackMe machine over your VPN). This example targets loopback; set lab=true so loopback/private ranges are permitted.",
+  "task": "Enumerate the authorized target's open ports and services, find the flag, and report where it came from.",
+  "flag_format": "flag\\{[^}]{1,200}\\}",
+  "files": [],
+  "target": {
+    "host": "127.0.0.1",
+    "lab": true,
+    "ports": "1-1024",
+    "max_ports": 1024,
+    "max_connections": 200,
+    "connect_timeout_ms": 1500,
+    "min_interval_ms": 0
+  }
+}

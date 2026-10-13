@@ -20,8 +20,9 @@ activity by itself. The read-only tools are `challenge_file`, `file_identify`,
 `encoding_decode`, `archive_inspect`, `image_triage`, `pcap_summary`,
 `document_parse`, `crypto_analyze`, `artifact_extract`, and `list_capabilities`
 (plus the passive `summarize_evidence` lens); nothing is executed. A challenge may
-additionally declare a `web` block to authorize a single web origin; only then do
-the network `web_*` tools exist (see below).
+additionally declare a `web` block to authorize a single web origin and/or a
+`target` block to authorize a single network host; only then do the matching
+network `web_*` / `net_*` tools exist (see below).
 
 ## challenge.json fields
 
@@ -35,7 +36,8 @@ the network `web_*` tools exist (see below).
 | `flag_format` | no | A regex the flag must fully match. Omit to use the built-in default (`flag{...}`, `ctf{...}`, etc.). |
 | `submit` | no | Optional CTFd-style `{"url", "token", "field"}` for remote verification. Only used when `GRYPHOS_CTF_REMOTE_VERIFY=true`. |
 | `files` | no | Explicit provided-file list. If omitted, all files in the directory (except `challenge.json`) are listed. |
-| `web` | no | Authorizes a single web origin (see below). Without it the solver has **no network tools**. |
+| `web` | no | Authorizes a single web origin (see below). Without it the solver has **no web tools**. |
+| `target` | no | Authorizes a single network host for bounded reconnaissance (see below). Without it the solver has **no network-scan tools**. |
 
 \* If `id` is omitted, the directory name is used.
 
@@ -83,6 +85,62 @@ Web tools registered when a `web` origin is authorized: `web_fetch` (one resourc
 forms, links, scripts, endpoints, comments, optional robots/sitemap), `web_session`
 (form submit / login, cookie tracking, security headers), `web_probe` (compare up
 to six controlled inputs), and `web_clues` (offline, no-network clue ranking).
+
+## The `target` block (authorized network solving)
+
+Adding a `target` block is the operator's explicit authorization for the solver to
+open TCP connections — **only** to that one host. If a challenge has no `target`
+block, no network-scan tools exist and the solver cannot contact anything. This is
+the network-reconnaissance analogue of the `web` block and is what lets the solver
+work a TryHackMe-style machine (typically a private VPN address, so `lab: true`).
+
+```json
+"target": {
+  "host": "10.10.5.12",
+  "lab": true,
+  "ports": "1-1024",
+  "max_ports": 1024,
+  "max_connections": 200,
+  "connect_timeout_ms": 1500,
+  "min_interval_ms": 0
+}
+```
+
+| Field | Required | Meaning |
+|---|---|---|
+| `host` | yes | The **only** IP/hostname reachable. A hostname is re-resolved and every address validated on each connection. |
+| `lab` | no | Must be `true` to allow loopback/private/reserved/CGNAT/test-net destinations. Default `false`. |
+| `ports` | no | Declared port spec for scans: `"80"`, `"1-1024"`, or `"22,80,443"` (default `"1-1024"`). |
+| `max_ports` | no | Cap on ports selected by a spec (default 1024, ceiling 4096). |
+| `max_connections` | no | Per-run TCP connection budget (default 200, ceiling 2000). |
+| `connect_timeout_ms` | no | Per-connect timeout (default 1500, floor 100, ceiling 5000). |
+| `min_interval_ms` | no | Minimum delay between connections (default 0, ceiling 5000). |
+
+Safety properties (enforced in code, not by the model):
+
+- The solver may contact **only** the authorized host; any other host is refused.
+- The host is **re-resolved on every connection and every resolved address is
+  validated**, defeating DNS rebinding to a blocked address.
+- Cloud metadata (`169.254.169.254`), link-local, multicast, and reserved ranges
+  are blocked **unconditionally** — even for a `lab` target.
+- Ports, connection count, per-connect timeout, and rate are all bounded; a
+  challenge cannot raise its own limits beyond the hard ceilings.
+- Only **non-destructive reconnaissance** is available (no write actions, no
+  exploitation); banners and responses are treated as untrusted data.
+- `GRYPHOS_CTF_NET_ENABLED=false` forces all network tools off globally.
+
+You can also authorize a target at run time without editing the challenge, for a
+FT target you own:
+
+```
+solve <id> --target 10.10.5.12 --lab
+```
+
+Network tools registered when a `target` is authorized: `net_portscan` (bounded
+TCP connect scan, optional banner grab, `top=true` for common ports),
+`net_service_probe` (banner/service fingerprint on specific or discovered ports),
+`net_http_probe` (bounded GET/HEAD to an HTTP(S) service, redacted responses), and
+`net_clues` (offline, no-network clue ranking).
 
 ## Honesty model
 

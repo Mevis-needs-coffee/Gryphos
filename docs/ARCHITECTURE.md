@@ -21,7 +21,7 @@ of evidence.
 | `gryphos/analysis.py` | Offline evidence analysis (Tool 10): normalization, cross-tool correlation, contradiction detection, session comparison, and the passive `summarize_evidence` tool. |
 | `gryphos/session.py` | Session records and atomic JSON persistence: full evidence stream, legacy + corrupt-file tolerance, size limits, secret redaction. |
 | `gryphos/reporting.py` | Markdown report + JSON evidence generation (includes correlation and contradiction sections). |
-| `gryphos/ctf/` | Autonomous CTF solving: `models.py` (challenge/flag/hypothesis records), `loader.py` (challenge discovery), `planner.py` (persistent task plan), `flag.py` (detection + gated verification), `sandbox.py` (path confinement + bounded reads), `deps.py` (optional-capability discovery), `filetools.py`/`encoding.py`/`archives.py`/`images.py`/`pcap.py`/`documents.py`/`crypto.py` (offline analysis tools), `tools.py` (solver registry), `solver.py` (bounded loop), `report.py` (CTF report). |
+| `gryphos/ctf/` | Autonomous CTF solving: `models.py` (challenge/flag/hypothesis records), `loader.py` (challenge discovery), `planner.py` (persistent task plan), `flag.py` (detection + gated verification), `sandbox.py` (path confinement + bounded reads), `deps.py` (optional-capability discovery), `filetools.py`/`encoding.py`/`archives.py`/`images.py`/`pcap.py`/`documents.py`/`crypto.py` (offline analysis tools), `ipguard.py` (shared address policy), `webconfig.py`/`webscope.py`/`webclient.py`/`webtools.py` (authorized web solving), `netconfig.py`/`netscope.py`/`netclient.py`/`nettools.py` (authorized network recon), `tools.py` (solver registry), `solver.py` (bounded loop), `report.py` (CTF report). |
 
 ## Trust boundaries
 
@@ -317,7 +317,8 @@ after loop → steps_exhausted / time_budget (honest report)
 
 - **Challenge model** (`models.py`): id, name, one of 9 categories, description,
   task, root, optional flag-format regex, optional CTFd-style submit config,
-  provided files, and a status lifecycle.
+  optional `web` origin and optional network `target` authorization, provided
+  files, and a status lifecycle.
 - **Task plan** (`planner.py`): ordered `TaskItem`s with statuses
   `pending`/`running`/`completed`/`failed`/`blocked`, seeded deterministically
   from the category, with a `replan` that blocks superseded open work. The model
@@ -342,12 +343,21 @@ after loop → steps_exhausted / time_budget (honest report)
   `ctf/sandbox.py`; optional-capability discovery lives in `ctf/deps.py`. When a
   challenge declares a `flag_format`, it is compiled once and baked into every
   tool so flag-shaped strings surface in the structured evidence.
+- **Authorized web / network tools**: when a challenge declares a `web` block or a
+  `target` block, the solver is additionally given scope-pinned web (`web_*`) or
+  network (`net_*`) tools, registered only when the caller supplies the matching
+  scope+client. Both scopes reuse one address policy (`ctf/ipguard.py`) that
+  re-resolves the destination and rejects any connection whose resolved address is
+  blocked. Kill switches `GRYPHOS_CTF_WEB_ENABLED` / `GRYPHOS_CTF_NET_ENABLED`
+  force the tools off globally. The network phase is reconnaissance only (bounded
+  port scan, banner/service probe, read-only HTTP probe, offline clue synthesis).
 - **Bounds and safety**: step limit (`GRYPHOS_CTF_MAX_STEPS`, default 20),
   wall-clock budget (reuses `GRYPHOS_TIME_BUDGET_SECONDS`), per-tool timeout and
   output bounds, canonical-fingerprint anti-repetition for both actions and flag
   candidates, a consecutive-failure abort, and bounded transient-LLM resume. File
   contents are untrusted data, never instructions; the solver never runs shell
-  commands and makes no network activity by itself. Analysis tools additionally
+  commands and makes **no network activity unless the challenge explicitly
+  authorizes a `web` origin or `target`**. Analysis tools additionally
   enforce read/scan size caps, archive member/total/entry/ratio/depth caps, a
   decode-round cap, carve-object and candidate/key-length caps, and extract only
   into a discarded private temp directory — unknown binaries, macros, scripts, and

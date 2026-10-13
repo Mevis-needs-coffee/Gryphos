@@ -88,6 +88,7 @@ class Settings:
     ctf_max_steps: int = 20
     ctf_remote_verify: bool = False
     ctf_web_enabled: bool = True
+    ctf_net_enabled: bool = True
 
     @property
     def api_key_configured(self) -> bool:
@@ -122,6 +123,7 @@ class Settings:
             "ctf_max_steps": self.ctf_max_steps,
             "ctf_remote_verify": self.ctf_remote_verify,
             "ctf_web_enabled": self.ctf_web_enabled,
+            "ctf_net_enabled": self.ctf_net_enabled,
         }
 
 
@@ -155,4 +157,5 @@ def get_settings() -> Settings:
         ctf_max_steps=_int_env("GRYPHOS_CTF_MAX_STEPS"),
         ctf_remote_verify=_bool_env("GRYPHOS_CTF_REMOTE_VERIFY"),
         ctf_web_enabled=_bool_env("GRYPHOS_CTF_WEB_ENABLED", default=True),
+        ctf_net_enabled=_bool_env("GRYPHOS_CTF_NET_ENABLED", default=True),
     )

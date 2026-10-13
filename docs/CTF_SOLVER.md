@@ -4,8 +4,10 @@ Extends Gryphos from an approval-based assessment assistant into a bounded,
 autonomous solver for explicitly configured CTF challenges. Phase 1 implements
 the full solve pipeline; Phase 2 adds a suite of offline, registered *analysis*
 tools (file/encoding/archive/image/pcap/document/crypto/artifact) with strict
-safety bounds. Remote flag submission and cross-challenge persistence remain the
-only explicitly deferred parts.
+safety bounds. Phase 3 adds bounded, scope-pinned **web** solving (authorized
+single origin); Phase 4 adds bounded, scope-pinned **network** reconnaissance
+(authorized single target). Remote flag submission and cross-challenge persistence
+remain the only explicitly deferred parts.
 
 ## Scope of work
 
@@ -259,3 +261,84 @@ Fully offline, using a local mock HTTP server (`tests/webserver.py`) bound to
   comparison, and clue ranking.
 - `tests/test_ctf_web_solve.py` — solver integration (fetch→verify), prompt/plan
   seeding, the kill switch, and that an origin is unreachable without authorization.
+
+## Phase 4 — authorized network solving
+
+Phase 4 adds a bounded, scope-pinned **TCP** capability to the same solver
+registry, so the solver can work a network host (e.g. a TryHackMe machine) rather
+than only web origins. It is off unless a challenge explicitly authorizes a single
+`target`, and even then every connection passes through the same execution-time
+guard. This phase is **reconnaissance only**: port scanning, banner/service
+fingerprinting, and read-only HTTP(S) probes. There is no exploitation, no
+state-changing action, and no write primitive.
+
+Phase 3 and Phase 4 share one IP policy (`ipguard.py`): the web and network scopes
+both resolve the destination and reject the connection if **any** resolved address
+is blocked, so a hostname cannot rebind to a metadata/link-local address.
+
+### New modules under `gryphos/ctf/`
+
+- `ipguard.py` — the shared address policy: `check_host` resolves a host and
+  enforces the always-blocked ranges (cloud metadata, link-local, multicast,
+  reserved) and the lab-only ranges (loopback, private, CGNAT, test-net).
+- `netconfig.py` — `TargetConfig`: the operator's authorization (one `host`,
+  optional `lab`, a declared `ports` spec, and clamped `max_ports` /
+  `max_connections` / `connect_timeout_ms` / `min_interval_ms` bounds). Loaded from
+  the challenge's `target` block; a missing block means no network tools at all.
+- `netscope.py` — `NetScope`: turns the config into an execution boundary. The
+  configured host must itself satisfy the IP policy (fail fast), a requested host
+  must equal the authorized one, and requested ports are parsed and bounded.
+- `netclient.py` — `NetClient`: a bounded TCP client pinned to one validated IP.
+  Enforces the connection budget, the optional min-interval rate limit, a
+  wall-clock deadline, and a bounded worker pool; caps and sanitizes banner reads;
+  records transport errors as data. `service_hint` maps a port/banner to a likely
+  service name (never authoritative).
+- `nettools.py` — the registered tools (below) plus a `collect_net_clues`
+  synthesizer shared by `net_clues` and the report. The HTTP probe reuses the
+  Phase 3 pinned connection class and response redaction.
+
+### Registered network tools
+
+- `net_portscan` — bounded TCP connect scan of a port range (or `top=true` for a
+  built-in common-port set); reports open/closed/filtered ports and optionally
+  reads a short banner from each open port.
+- `net_service_probe` — banner grab / service fingerprint on specific ports, or on
+  the ports already discovered.
+- `net_http_probe` — bounded GET/HEAD to an HTTP(S) service on the target, with a
+  redacted status/headers/body; several `paths` can be checked in one step.
+- `net_clues` — **offline** (no network) prioritization of the network evidence
+  gathered so far: open ports, services, banners, and probed HTTP endpoints, ranked
+  by security-relevant keywords.
+
+All network tools bake in the challenge's `flag_format`, so flags surfacing in any
+banner or response body appear in structured evidence. A `target` can also be
+authorized at run time with `solve <id> --target <host> [--lab]`, which builds or
+overrides the challenge's `target` block.
+
+### Safety bounds (Phase 4)
+
+- **Authorization is explicit and configuration-driven.** No `target` block → no
+  network tools. `GRYPHOS_CTF_NET_ENABLED=false` disables them even when declared.
+- **Scope is enforced at execution time**, per connection: only the authorized host
+  is ever contacted, and the resolved/validated IP is what is dialed.
+- Only non-destructive reconnaissance exists; there is no exploitation or
+  state-changing module in this phase.
+- Ports, connection count, per-connect timeout, and rate are hard-bounded; the
+  challenge cannot raise its own ceilings.
+- Banners and HTTP responses are treated as untrusted data, never as instructions.
+
+### Phase 4 test coverage
+
+Fully offline, using a local mock TCP server (`tests/tcpserver.py`) and the Phase 3
+mock HTTP server, both bound to `127.0.0.1`; no public target is ever contacted:
+
+- `tests/test_ctf_net_config.py` — host/port/bounds validation, ceiling clamps,
+  `target` block parsing and loader integration.
+- `tests/test_ctf_netscope.py` — single-target policy, IP policy, blocked ranges,
+  port bounds.
+- `tests/test_ctf_nettools.py` — scan/probe/http/clues end-to-end against the mocks,
+  including banner fingerprinting, flag surfacing, budget exhaustion, and registry
+  gating.
+- `tests/test_ctf_net_solve.py` — solver integration (scan→verify), prompt/plan
+  seeding, the kill switch, absence without authorization, private-without-lab
+  refusal, the network report section, and CLI argument parsing.

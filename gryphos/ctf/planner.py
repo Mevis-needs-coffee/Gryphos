@@ -197,6 +197,23 @@ def build_initial_plan(challenge: Challenge) -> TaskPlan:
             "Call web_clues to prioritize the most promising lead.",
             "Rank clues by evidence rather than guessing the next request.",
         )
+    if getattr(challenge, "target", None) is not None:
+        plan.add(
+            "Scan the authorized target for open ports (net_portscan).",
+            "You cannot attack or inspect services you have not discovered.",
+        )
+        plan.add(
+            "Fingerprint the services on any open ports (net_service_probe).",
+            "Service and version identity determine the likely next step.",
+        )
+        plan.add(
+            "Probe any HTTP service found and common paths (net_http_probe).",
+            "Web front ends are the most common source of a foothold or flag.",
+        )
+        plan.add(
+            "Call net_clues to prioritize the most promising network lead.",
+            "Rank ports/services/banners by evidence rather than guessing.",
+        )
     plan.add(
         "Analyze the most promising artifact and record concrete observations.",
         "Observations, not guesses, drive the solution.",

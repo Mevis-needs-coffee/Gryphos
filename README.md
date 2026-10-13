@@ -193,10 +193,11 @@ GRYPHOS_ALLOWED_TARGETS=127.0.0.1/32
   are clamped to safe ranges; invalid values fall back to defaults with a log warning.
 - CTF solver settings: `GRYPHOS_CTF_CHALLENGES_DIR` (default `challenges`),
   `GRYPHOS_CTF_MAX_STEPS` (1-100, default 20), `GRYPHOS_CTF_REMOTE_VERIFY`
-  (default `false`), and `GRYPHOS_CTF_WEB_ENABLED` (default `true`; a global kill
-  switch for the authorized web tools). Remote flag submission only works for
-  challenges that declare a `submit` block and is off unless you explicitly enable
-  it.
+  (default `false`), `GRYPHOS_CTF_WEB_ENABLED` (default `true`; a global kill
+  switch for the authorized web tools), and `GRYPHOS_CTF_NET_ENABLED` (default
+  `true`; a global kill switch for the authorized network tools). Remote flag
+  submission only works for challenges that declare a `submit` block and is off
+  unless you explicitly enable it.
 
 ### OpenRouter API key
 
@@ -327,6 +328,16 @@ How the solver stays honest and bounded:
   blocked; cross-origin redirects are refused unless opted in; and cookies,
   tokens, and credentials are redacted before they reach the model or the report.
   `GRYPHOS_CTF_WEB_ENABLED=false` forces them off globally.
+- **Authorized network tools (opt-in).** A challenge may declare a `target` block
+  naming exactly one host; only then do `net_portscan`, `net_service_probe`,
+  `net_http_probe`, and the offline `net_clues` exist (a target can also be given
+  at run time with `solve <id> --target <host> --lab`). It is reconnaissance only:
+  bounded TCP port scanning, banner/service fingerprinting, and read-only HTTP(S)
+  probes — no exploitation or state-changing actions. The connection count,
+  per-connect timeout, port range, and rate are bounded; the host is re-resolved
+  and every address validated per connection; cloud-metadata/link-local ranges are
+  always blocked; and banners/responses are treated as untrusted data.
+  `GRYPHOS_CTF_NET_ENABLED=false` forces them off globally.
 - **A persistent task plan** (pending/running/completed/failed/blocked) is seeded
   from the category, updated every step, and saved with the session and report.
 - **Duplicate-action and duplicate-flag prevention** via canonical fingerprints,
@@ -337,10 +348,10 @@ How the solver stays honest and bounded:
   only checks format conformance (the report says so); an opt-in CTFd-style HTTP
   verifier is used only for challenges that declare a `submit` block *and* when
   `GRYPHOS_CTF_REMOTE_VERIFY=true`.
-- **Untrusted data, never executed.** Provided file contents and HTTP responses
-  are treated as data, never as instructions; unknown binaries, macros, scripts,
-  and extracted programs are never run, and extraction targets a discarded
-  temporary directory.
+- **Untrusted data, never executed.** Provided file contents, HTTP responses, and
+  service banners are treated as data, never as instructions; unknown binaries,
+  macros, scripts, and extracted programs are never run, and extraction targets a
+  discarded temporary directory.
 - **Triage, not a universal solver.** The analysis tools cover common
   encodings/archives/ciphers; unusual obfuscation, encrypted archives, and
   LSB-extraction tools (e.g. steghide) are reported as leads rather than solved

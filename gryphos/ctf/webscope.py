@@ -19,31 +19,12 @@ make must pass through here, so the model can never widen its own reach:
 
 from __future__ import annotations
 
-import ipaddress
-import socket
 from dataclasses import dataclass
 
-from ..scope import classify_ip
+from .ipguard import AddressPolicyError, check_host
 from .webconfig import WebConfig
 
 MAX_PATH_LEN = 2048
-
-# Address categories that are never reachable, even with `lab: true`.
-_ALWAYS_BLOCKED = frozenset({
-    "unspecified",
-    "cloud_metadata (link-local)",
-    "link-local",
-    "multicast/reserved",
-    "reserved (future use)",
-})
-# Address categories reachable only when the operator sets `lab: true`.
-_LAB_ONLY = frozenset({
-    "private",
-    "loopback",
-    "CGNAT (shared)",
-    "reserved/testing",
-    "documentation (TEST-NET)",
-})
 
 
 class WebScopeError(ValueError):
@@ -62,14 +43,6 @@ class WebTarget:
     @property
     def url(self) -> str:
         return f"{self.scheme}://{self.host}:{self.port}{self.path}"
-
-
-def _is_ip_literal(host: str) -> bool:
-    try:
-        ipaddress.ip_address(host)
-        return True
-    except ValueError:
-        return False
 
 
 class WebScope:
@@ -110,20 +83,6 @@ class WebScope:
 
     # -- IP policy --------------------------------------------------------
 
-    def _address_error(self, address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> str | None:
-        categories = classify_ip(address)
-        blocked = [c for c in categories if c in _ALWAYS_BLOCKED]
-        if blocked:
-            return f"address {address} is a blocked range ({', '.join(blocked)})"
-        if not self.lab:
-            private = [c for c in categories if c in _LAB_ONLY]
-            if private:
-                return (
-                    f"address {address} is {', '.join(private)}; set \"lab\": true on the "
-                    "web mission to authorize private/loopback/reserved lab targets"
-                )
-        return None
-
     def resolve_destination(self, host: str) -> list[str]:
         """Resolve `host` and verify every address satisfies the IP policy.
 
@@ -131,29 +90,10 @@ class WebScope:
         host is malformed, does not resolve, or any resolved address is blocked
         (which is the DNS-rebinding guard).
         """
-        text = (host or "").strip()
-        if not text:
-            raise WebScopeError("Destination host is empty.")
-        if _is_ip_literal(text):
-            addresses = [str(ipaddress.ip_address(text))]
-        else:
-            try:
-                infos = socket.getaddrinfo(text, None, proto=socket.IPPROTO_TCP)
-            except socket.gaierror as exc:
-                raise WebScopeError(f"Could not resolve host {text!r}: {exc}") from exc
-            addresses = []
-            for info in infos:
-                candidate = str(info[4][0])
-                if candidate not in addresses:
-                    addresses.append(candidate)
-            if not addresses:
-                raise WebScopeError(f"Host {text!r} did not resolve to any address.")
-        for candidate in addresses:
-            address = ipaddress.ip_address(candidate)
-            problem = self._address_error(address)
-            if problem:
-                raise WebScopeError(f"Refused destination {text!r}: {problem}.")
-        return addresses
+        try:
+            return check_host(host, lab=self.lab)
+        except AddressPolicyError as exc:
+            raise WebScopeError(str(exc)) from exc
 
     # -- endpoint / path policy ------------------------------------------
 

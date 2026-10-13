@@ -24,6 +24,7 @@ from .flag import (
 )
 from .loader import ChallengeError, discover_challenges, load_challenge
 from .models import CHALLENGE_CATEGORIES, Challenge, FlagCandidate, Hypothesis
+from .netconfig import TargetConfig, TargetConfigError
 from .planner import TaskItem, TaskPlan
 from .solver import SolveOutcome, Solver, run_solver
 from .webconfig import WebConfig, WebConfigError
@@ -39,6 +40,8 @@ __all__ = [
     "Hypothesis",
     "SolveOutcome",
     "Solver",
+    "TargetConfig",
+    "TargetConfigError",
     "TaskItem",
     "TaskPlan",
     "WebConfig",

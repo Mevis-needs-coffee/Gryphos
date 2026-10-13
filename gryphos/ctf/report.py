@@ -13,6 +13,7 @@ from pathlib import Path
 
 from ..reporting import _atomic_write, _fence, escape_markdown
 from ..session import Session
+from .nettools import collect_net_clues
 from .webtools import collect_web_clues
 
 
@@ -146,6 +147,66 @@ def _render_web(challenge: dict, evidence: list[dict]) -> str | None:
     return "\n".join(lines) + "\n"
 
 
+def _render_net(challenge: dict, evidence: list[dict]) -> str | None:
+    """A reproducible, redacted write-up of the authorized network activity."""
+    target = challenge.get("target")
+    net_items = [
+        item for item in evidence
+        if item.get("kind") == "tool_result" and str(item.get("tool", "")).startswith("net_")
+    ]
+    if not target and not net_items:
+        return None
+    lines: list[str] = []
+    if target:
+        lines.append(f"- **Authorized target:** `{escape_markdown(str(target.get('host', '')))}`")
+        lines.append(
+            f"- **Lab mode:** {bool(target.get('lab'))}  •  "
+            f"**ports:** `{escape_markdown(str(target.get('ports', '')))}`  •  "
+            f"**max connections:** {target.get('max_connections')}"
+        )
+    else:
+        lines.append("- _No network target was authorized; no connections were made._")
+    if net_items:
+        lines.append("")
+        lines.append("Activity (responses redacted):")
+        lines.append("")
+        lines.append("| Step | Action | Result |")
+        lines.append("|---|---|---|")
+        for index, item in enumerate(net_items, 1):
+            data = item.get("data") or {}
+            if "open_ports" in data:
+                result = f"{len(data.get('open_ports') or [])} open / {data.get('scanned', '?')} scanned"
+            elif "services" in data:
+                result = f"{len(data.get('services') or [])} service(s) probed"
+            elif "responses" in data:
+                result = f"{len(data.get('responses') or [])} request(s)"
+            else:
+                result = "ok"
+            action = escape_markdown(str(item.get("command", "")))
+            lines.append(f"| {index} | `{action}` | {escape_markdown(result)} |")
+
+    clues, meta = collect_net_clues(evidence)
+    if meta.get("open_ports"):
+        lines.append("")
+        lines.append("Open ports: " + ", ".join(f"`{escape_markdown(str(p))}`" for p in meta["open_ports"]))
+    if meta.get("services"):
+        lines.append("")
+        lines.append("Fingerprinted services: " + ", ".join(f"`{escape_markdown(str(s))}`" for s in meta["services"]))
+    entries = sorted(clues.values(), key=lambda e: (-e["priority"], e["kind"], e["value"]))[:15]
+    if entries:
+        lines.append("")
+        lines.append("Prioritized clues:")
+        lines.append("")
+        lines.append("| Kind | Value | Priority |")
+        lines.append("|---|---|---|")
+        for entry in entries:
+            lines.append(
+                f"| {escape_markdown(entry['kind'])} | "
+                f"`{escape_markdown(entry['value'])}` | {entry['priority']} |"
+            )
+    return "\n".join(lines) + "\n"
+
+
 def build_ctf_markdown(session: Session, outcome: dict) -> str:
     challenge = session.challenge or {}
     solved = bool(outcome.get("solved"))
@@ -190,15 +251,20 @@ def build_ctf_markdown(session: Session, outcome: dict) -> str:
     lines.append(_section("6. Evidence"))
     lines.append(_render_evidence(outcome.get("evidence") or session.evidence or []))
 
-    web_section = _render_web(challenge, outcome.get("evidence") or session.evidence or [])
+    evidence = outcome.get("evidence") or session.evidence or []
+    section_no = 6
+    web_section = _render_web(challenge, evidence)
     if web_section is not None:
-        lines.append(_section("7. Web activity"))
+        section_no += 1
+        lines.append(_section(f"{section_no}. Web activity"))
         lines.append(web_section)
-        errors_number = 8
-        limitations_number = 9
-    else:
-        errors_number = 7
-        limitations_number = 8
+    net_section = _render_net(challenge, evidence)
+    if net_section is not None:
+        section_no += 1
+        lines.append(_section(f"{section_no}. Network activity"))
+        lines.append(net_section)
+    errors_number = section_no + 1
+    limitations_number = section_no + 2
 
     lines.append(_section(f"{errors_number}. Errors and warnings"))
     if session.errors:
@@ -223,6 +289,12 @@ def build_ctf_markdown(session: Session, outcome: dict) -> str:
             "- Web requests were confined to the operator-authorized origin; cross-origin and "
             "cloud-metadata destinations were refused, every resolved address was validated, "
             "and cookies/tokens/credentials are redacted in this report.\n"
+        )
+    if net_section is not None:
+        lines.append(
+            "- Network connections were confined to the operator-authorized target; other hosts "
+            "and cloud-metadata/link-local destinations were refused, every resolved address was "
+            "validated, and only non-destructive reconnaissance was performed.\n"
         )
     return "\n".join(lines) + "\n"
 

@@ -22,6 +22,11 @@ This registry is separate from the assessment registry on purpose: `solve` and
 `assess` expose different, minimal capabilities. When a challenge declares a
 `flag_format`, it is baked into every tool so flag-shaped strings surface in the
 structured evidence the solver sees.
+
+A challenge may additionally authorize one web origin (`web`) and/or one network
+target (`target`). The matching `web_*` / `net_*` tools are added only when the
+caller supplies the corresponding scope+client, so an unauthorized challenge has
+no network capability at all.
 """
 
 from __future__ import annotations
@@ -40,6 +45,14 @@ from .encoding import encoding_decode_spec
 from .filetools import artifact_extract_spec, file_identify_spec
 from .flag import FlagFormat
 from .images import image_triage_spec
+from .netclient import NetClient
+from .netscope import NetScope
+from .nettools import (
+    net_clues_spec,
+    net_http_probe_spec,
+    net_portscan_spec,
+    net_service_probe_spec,
+)
 from .pcap import pcap_summary_spec
 from .webclient import WebClient
 from .webscope import WebScope
@@ -225,6 +238,8 @@ def build_solver_registry(
     flag_pattern: str | None = None,
     web_scope: WebScope | None = None,
     web_client: WebClient | None = None,
+    net_scope: NetScope | None = None,
+    net_client: NetClient | None = None,
 ) -> dict[str, ToolSpec]:
     """Return the fixed solver tool set.
 
@@ -234,7 +249,9 @@ def build_solver_registry(
 
     When a challenge declares an authorized web mission, the caller passes a
     matching `web_scope`/`web_client`; the read-oriented web tools are then added
-    to the registry. Without them the solver has no network capability at all.
+    to the registry. When a challenge declares an authorized network `target`, the
+    caller passes a matching `net_scope`/`net_client` and the network tools are
+    added. Without these the solver has no network capability at all.
     """
     fmt = FlagFormat(flag_pattern) if flag_pattern else FlagFormat()
     specs = [
@@ -257,6 +274,11 @@ def build_solver_registry(
         specs.append(web_session_spec(web_scope, web_client, fmt, timeout, out_limit))
         specs.append(web_probe_spec(web_scope, web_client, fmt, timeout, out_limit))
         specs.append(web_clues_spec(fmt, out_limit))
+    if net_scope is not None and net_client is not None:
+        specs.append(net_portscan_spec(net_scope, net_client, fmt, timeout, out_limit))
+        specs.append(net_service_probe_spec(net_scope, net_client, fmt, timeout, out_limit))
+        specs.append(net_http_probe_spec(net_scope, net_client, fmt, timeout, out_limit))
+        specs.append(net_clues_spec(fmt, out_limit))
     registry = {spec.name: spec for spec in specs}
     if len(registry) != len(specs):
         raise ValueError("Duplicate solver tool name.")

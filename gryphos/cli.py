@@ -168,6 +168,7 @@ def _cmd_help(state: AppState) -> None:
         "  scope             Show the authorized scope (see also: scope set|narrow|reset)\n"
         "  assess [text]     Run an assessment (optionally with an objective)\n"
         "  solve [id]        Solve a configured CTF challenge (list challenges if no id)\n"
+        "                    Add --target <host> [--lab] to authorize a network target\n"
         "  status            Current model, scope, and session info\n"
         "  sessions          List saved sessions\n"
         "  inspect <id>       Inspect a saved session (read-only, never replays)\n"
@@ -524,9 +525,53 @@ def _run_assessment(state: AppState, objective: str, target: str | None, interac
         state.last_target = target
 
 
+def _parse_solve_args(argument: str) -> tuple[str, str | None, bool]:
+    """Parse `solve <id> [--target <host>] [--lab]` (target may also be positional)."""
+    parts = argument.split()
+    if not parts:
+        return "", None, False
+    challenge_id = parts[0]
+    target: str | None = None
+    lab = False
+    index = 1
+    while index < len(parts):
+        arg = parts[index]
+        if arg == "--target" and index + 1 < len(parts):
+            target = parts[index + 1]
+            index += 2
+        elif arg.startswith("--target="):
+            target = arg.split("=", 1)[1]
+            index += 1
+        elif arg == "--lab":
+            lab = True
+            index += 1
+        elif target is None and not arg.startswith("--"):
+            target = arg
+            index += 1
+        else:
+            index += 1
+    return challenge_id, target, lab
+
+
+def _apply_target_override(challenge, target: str, lab: bool) -> None:
+    """Set/replace the authorized network target from CLI arguments."""
+    from dataclasses import replace
+
+    from .ctf.netconfig import DEFAULT_PORTS, TargetConfig, TargetConfigError
+
+    declared = challenge.target
+    if declared is not None:
+        try:
+            challenge.target = replace(declared, host=target, lab=declared.lab or lab)
+        except ValueError as exc:  # pragma: no cover - replace does not validate
+            raise TargetConfigError(str(exc)) from exc
+        return
+    challenge.target = TargetConfig.from_dict({"host": target, "lab": lab, "ports": DEFAULT_PORTS})
+
+
 def _cmd_solve(state: AppState, argument: str) -> None:
     settings = state.settings
-    challenge_id = argument.strip()
+    challenge_id, target_override, lab_flag = _parse_solve_args(argument)
     if not challenge_id:
         entries = discover_challenges(settings.ctf_challenges_dir)
         if not entries:
@@ -554,6 +599,17 @@ def _cmd_solve(state: AppState, argument: str) -> None:
     except ChallengeError as exc:
         state.console.print(f"[red]Challenge error:[/red] {exc}")
         return
+
+    if target_override:
+        try:
+            _apply_target_override(challenge, target_override, lab_flag)
+        except ValueError as exc:
+            state.console.print(f"[red]Target error:[/red] {exc}")
+            return
+        state.console.print(
+            f"[cyan]Authorized network target:[/cyan] {challenge.target.host} "
+            f"(lab={challenge.target.lab}, ports '{challenge.target.ports}')"
+        )
 
     session = Session(
         session_id=new_session_id(),

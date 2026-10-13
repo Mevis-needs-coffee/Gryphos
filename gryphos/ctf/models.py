@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .netconfig import TargetConfig, TargetConfigError
 from .webconfig import WebConfig, WebConfigError
 
 # The nine challenge families the solver understands. A challenge must declare
@@ -36,7 +37,7 @@ CATEGORY_GUIDANCE: dict[str, str] = {
     "forensics": "recover data from a provided artifact (image, pcap, archive, memory).",
     "stego": "find data hidden inside another file; look for appended/embedded payloads.",
     "web": "analyze a local/authorized web challenge description and provided files.",
-    "network": "analyze a provided capture or network description; no live scanning.",
+    "network": "enumerate the authorized target's services; analyze any provided capture.",
     "reverse_engineering": "understand a provided binary/source artifact's behavior.",
     "binary_exploitation": "analyze a provided artifact for the intended memory flaw.",
 }
@@ -123,6 +124,7 @@ class Challenge:
     submit: dict | None = None  # optional CTFd-style {"url","token","field"}
     files: tuple[str, ...] = ()
     web: WebConfig | None = None  # optional authorized web origin (Phase 3)
+    target: TargetConfig | None = None  # optional authorized network target (Phase 4)
     status: str = "pending"
 
     def __post_init__(self) -> None:
@@ -154,6 +156,7 @@ class Challenge:
             "submit": dict(self.submit) if self.submit else None,
             "files": list(self.files),
             "web": self.web.to_dict() if self.web else None,
+            "target": self.target.to_dict() if self.target else None,
             "status": self.status,
         }
 
@@ -165,6 +168,12 @@ class Challenge:
                 web = WebConfig.from_dict(data["web"])
             except WebConfigError as exc:
                 raise ValueError(f"invalid web block: {exc}") from exc
+        target: TargetConfig | None = None
+        if data.get("target") is not None:
+            try:
+                target = TargetConfig.from_dict(data["target"])
+            except TargetConfigError as exc:
+                raise ValueError(f"invalid target block: {exc}") from exc
         return cls(
             id=str(data["id"]).strip(),
             name=str(data.get("name") or data["id"]).strip(),
@@ -176,5 +185,6 @@ class Challenge:
             submit=data.get("submit") or None,
             files=tuple(str(f) for f in (data.get("files") or [])),
             web=web,
+            target=target,
             status=str(data.get("status", "pending")),
         )
